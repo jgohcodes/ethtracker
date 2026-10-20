@@ -179,8 +179,9 @@ def test_mark_position_reports_liquidated_past_the_liq_price():
 
 
 def test_mark_position_time_flags():
-    warn = risk.mark_position(CFG, make_position(opened_at=(NOW - timedelta(days=75)).isoformat()), 3000, NOW)
-    stop = risk.mark_position(CFG, make_position(opened_at=(NOW - timedelta(days=91)).isoformat()), 3000, NOW)
+    assert CFG.max_holding_days == 14  # a two-week swing
+    warn = risk.mark_position(CFG, make_position(opened_at=(NOW - timedelta(days=12)).isoformat()), 3000, NOW)
+    stop = risk.mark_position(CFG, make_position(opened_at=(NOW - timedelta(days=15)).isoformat()), 3000, NOW)
     assert warn.flags == ("TIME_WARN",)
     assert "TIME_STOP" in stop.flags
 

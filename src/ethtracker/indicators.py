@@ -74,6 +74,9 @@ class Snapshot:
     high_90d: float
     low_90d: float
     drawdown_from_90d_high: float
+    drawdown_from_30d_high: float  # how far below the recent high: the "undersold" gauge
+    rise_from_30d_low: float  # how far above the recent low: the "overbought" gauge
+    zscore_20: float | None  # std devs from the 20d mean
     candles: int
 
 
@@ -99,6 +102,8 @@ def snapshot(df: pd.DataFrame, price: float | None = None) -> Snapshot:
     vol = _last(realized_vol(close, 30))
     recent = df.tail(90)
     high_90 = float(recent["high"].max())
+    month = df.tail(30)
+    zscore = _last((close - sma(close, 20)) / close.rolling(20).std(ddof=0))
     return Snapshot(
         price=last,
         ret_7d=_ret(close, 7), ret_30d=_ret(close, 30), ret_90d=_ret(close, 90),
@@ -108,5 +113,8 @@ def snapshot(df: pd.DataFrame, price: float | None = None) -> Snapshot:
         vol_30d=vol, daily_sigma=None if vol is None else vol / np.sqrt(DAYS_PER_YEAR),
         high_90d=high_90, low_90d=float(recent["low"].min()),
         drawdown_from_90d_high=1 - last / high_90,
+        drawdown_from_30d_high=1 - last / float(month["high"].max()),
+        rise_from_30d_low=last / float(month["low"].min()) - 1,
+        zscore_20=zscore,
         candles=len(df),
     )

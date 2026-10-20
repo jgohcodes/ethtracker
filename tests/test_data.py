@@ -37,6 +37,24 @@ def test_kraken_error_payload_raises():
         data.parse_kraken_ohlc({"error": ["EQuery:Unknown asset pair"], "result": {}})
 
 
+def test_parse_coinbase_spot_accepts_documented_shape_with_or_without_base():
+    assert data.parse_coinbase_spot({"data": {"amount": "3000.12", "currency": "USD"}}) == 3000.12
+    assert data.parse_coinbase_spot({"data": {"base": "ETH", "currency": "USD", "amount": "2999"}}) == 2999.0
+
+
+@pytest.mark.parametrize("payload", [{}, {"data": {}}, {"data": {"amount": "n/a"}}, {"errors": [{"id": "x"}]}, None])
+def test_parse_coinbase_spot_rejects_unexpected_payloads(payload):
+    with pytest.raises(data.DataError, match="unexpected Coinbase price payload"):
+        data.parse_coinbase_spot(payload)
+
+
+def test_coinbase_spot_uses_the_prices_api_not_the_exchange_ticker(monkeypatch):
+    seen = []
+    monkeypatch.setattr(data, "_get_json", lambda url, params=None: seen.append(url) or {"data": {"amount": "1.5"}})
+    assert data.Coinbase().spot() == 1.5
+    assert seen == ["https://api.coinbase.com/v2/prices/ETH-USD/spot"]
+
+
 def test_empty_candles_raise():
     with pytest.raises(data.DataError):
         data.parse_coinbase_candles([])
@@ -74,8 +92,8 @@ def test_coinbase_paginates_past_the_300_candle_limit(monkeypatch):
 
     def fake_get_json(url, params=None):
         calls.append(url)
-        if url.endswith("/ticker"):
-            return {"price": "3000.5"}
+        if "/v2/prices/" in url:
+            return {"data": {"amount": "3000.5", "currency": "USD"}}
         start, end = (datetime.fromisoformat(params[k]) for k in ("start", "end"))
         day = start.replace(hour=0, minute=0, second=0, microsecond=0)
         rows = []

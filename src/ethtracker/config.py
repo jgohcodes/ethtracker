@@ -26,7 +26,7 @@ class Config:
     min_stop_atr_multiple: float = 2.0
     max_margin_pct: float = 50.0
     min_reward_risk: float = 2.0
-    max_holding_days: int = 90
+    max_holding_days: int = 14
     max_account_drawdown_pct: float = 20.0
     liq_warn_pct: float = 3.0
     maintenance_margin_rate: float = 0.005
@@ -43,7 +43,7 @@ COMMENTS = {
     "min_stop_atr_multiple": "Stop must be at least this many 14d ATRs from entry (0 disables): tighter sits inside daily noise",
     "max_margin_pct": "Max margin posted to a single position, % of equity",
     "min_reward_risk": "Minimum net reward:risk (after fees and funding) when a target is given",
-    "max_holding_days": "Time stop: your 3-month swing horizon",
+    "max_holding_days": "Time stop and funding/history horizon: how long you hold a swing, in days",
     "max_account_drawdown_pct": "Flag when equity is this far below its recorded peak",
     "liq_warn_pct": "Flag when price is within this many % of liquidation",
     "maintenance_margin_rate": "Verify against your venue's tier table; varies by notional",

@@ -54,6 +54,15 @@ def test_snapshot_fields_and_price_override(candles):
     assert snap.candles == len(candles)
 
 
+def test_snapshot_pullback_gauges(candles):
+    snap = indicators.snapshot(candles)
+    month = candles.tail(30)
+    assert snap.drawdown_from_30d_high == pytest.approx(1 - snap.price / month["high"].max())
+    assert snap.rise_from_30d_low == pytest.approx(snap.price / month["low"].min() - 1)
+    window = candles["close"].tail(20)
+    assert snap.zscore_20 == pytest.approx((window.iloc[-1] - window.mean()) / window.std(ddof=0))
+
+
 def test_snapshot_leaves_long_windows_empty_when_history_is_short(candles):
     snap = indicators.snapshot(candles.head(40))
     assert snap.sma_200 is None and snap.ret_90d is None

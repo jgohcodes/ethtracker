@@ -70,6 +70,26 @@ def test_snapshot_from_csv(capsys, candles_csv):
         assert label in out
 
 
+def test_study_from_csv_prints_trades_summary_and_caveats(capsys, candles_csv):
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "study", "--trigger", 10,
+                    "--stop-atr", 2, "--target-r", 2, "--leverage", 3, "--days", 500)
+    assert code == 0
+    for text in ("Rule: long", "winners", "R multiples", "Buy-and-hold", "Not tuned"):
+        assert text in out
+
+
+def test_study_needs_exactly_one_stop_definition(capsys, candles_csv):
+    with pytest.raises(SystemExit):
+        main(["--provider", "csv", "--csv", str(candles_csv), "study", "--leverage", "3"])
+    with pytest.raises(SystemExit):
+        main(["--provider", "csv", "--csv", str(candles_csv), "study", "--leverage", "3", "--stop-pct", "5", "--stop-atr", "2"])
+
+
+def test_snapshot_shows_pullback_gauges(capsys, candles_csv):
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "snapshot", "--days", 500)
+    assert "Pullback" in out and "below the 30d high" in out
+
+
 def test_price_from_csv(capsys, candles_csv):
     code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "price")
     assert code == 0 and float(out) > 0

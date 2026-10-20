@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import alerts, config, indicators, risk
+from . import alerts, config, indicators, risk, study
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 
@@ -178,10 +178,61 @@ def cmd_snapshot(args, ctx: Ctx) -> int:
     print(f"ATR 14       {na(snap.atr_14, usd)} = {na(snap.atr_14_pct, pct)} of price (typical daily range)")
     print(f"Volatility   30d realised {na(snap.vol_30d, pct)} annualised, typical 1-day move {na(snap.daily_sigma, pct)}")
     print(f"90d range    {usd(snap.low_90d)} - {usd(snap.high_90d)}; {pct(snap.drawdown_from_90d_high)} below the 90d high")
+    print(f"Pullback     {pct(snap.drawdown_from_30d_high)} below the 30d high, {pct(snap.rise_from_30d_low)} above the 30d low, {na(snap.zscore_20, lambda x: f'{x:+.1f}')} std devs from the 20d mean")
     print()
     for side in ("long", "short"):
         for line in history_lines(df, side, ctx.cfg.max_holding_days):
             print(line)
+    return 0
+
+
+def cmd_study(args, ctx: Ctx) -> int:
+    provider = _provider(args, ctx)
+    df = provider.candles(args.days)
+    horizon = args.horizon or ctx.cfg.max_holding_days
+    risk_pct = ctx.cfg.risk_per_trade_pct if args.risk_pct is None else args.risk_pct
+
+    def frac(value):
+        return None if value is None else value / 100
+
+    trades = study.run(
+        ctx.cfg, df, args.side, lookback=args.lookback, trigger=args.trigger / 100, horizon=horizon,
+        leverage=args.leverage, stop_pct=frac(args.stop_pct), stop_atr=args.stop_atr,
+        target_pct=frac(args.target_pct), target_r=args.target_r,
+    )
+    anchor = "below its" if args.side == "long" else "above its"
+    extreme = "high" if args.side == "long" else "low"
+    stop = f"{args.stop_pct:g}%" if args.stop_pct is not None else f"{args.stop_atr:g}x ATR"
+    target = "none" if args.target_pct is None and args.target_r is None else (
+        f"{args.target_pct:g}%" if args.target_pct is not None else f"{args.target_r:g}R")
+    print(f"Rule: {args.side} at the close when price is >= {args.trigger:g}% {anchor} {args.lookback}d {extreme}; "
+          f"stop {stop}, target {target}, {args.leverage:g}x, time stop {horizon}d")
+    print(f"Data: {len(df)} daily candles, {df.index[0]:%Y-%m-%d} to {df.index[-1]:%Y-%m-%d} ({provider.name})")
+    print("-" * 78)
+
+    summary = study.summarize(trades)
+    if summary is None:
+        print("No trades triggered in this history.")
+        return 0
+
+    shown = trades if len(trades) <= 40 else trades[-20:]
+    if len(shown) < len(trades):
+        print(f"(showing the last {len(shown)} of {len(trades)} trades)")
+    print(f"  {'entered':<11} {'exited':<11} {'entry':>10} {'exit':>10} {'outcome':<10} {'days':>4} {'R':>7}")
+    for t in shown:
+        print(f"  {t.entry_date:%Y-%m-%d}  {t.exit_date:%Y-%m-%d} {t.entry:>10,.2f} {t.exit:>10,.2f} {t.outcome:<10} {t.days_held:>4} {t.r:>+7.2f}")
+    print("-" * 78)
+    mix = ", ".join(f"{k} {v}" for k, v in sorted(summary.outcomes.items()))
+    print(f"{summary.n} trades, {summary.wins} winners ({summary.wins / summary.n:.0%}); {mix}; avg hold {summary.avg_days:.1f}d")
+    print(f"R multiples: avg {summary.avg_r:+.2f}, median {summary.median_r:+.2f}, total {summary.total_r:+.1f}, best {summary.best_r:+.2f}, worst {summary.worst_r:+.2f}")
+    total, drawdown = study.compound(trades, risk_pct)
+    held = float(df["close"].iloc[-1] / df["close"].iloc[args.lookback - 1] - 1)
+    print(f"Risking {risk_pct:g}% per trade: {total:+.1%} total, max drawdown {pct(drawdown)}.  Buy-and-hold ETH over the same window: {held:+.1%}")
+    print()
+    if summary.n < 30:
+        print(f"Only {summary.n} trades: win rate and expectancy are not statistically reliable at this sample size.")
+    print("Not tuned. Varying --trigger, --stop or --target until the result looks good fits noise, not edge.")
+    print("Daily bars: fills at stop/target are assumed exact (no slippage or gap-through); a same-day stop and target counts as the stop.")
     return 0
 
 
@@ -381,6 +432,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("snapshot", cmd_snapshot, "price, trend, volatility and historical adverse-move stats")
     sp.add_argument("--days", type=int, default=1000, help="daily candles to fetch (Kraken caps at 720)")
+
+    sp = add("study", cmd_study, "simulate your pullback rule on daily candles (R-multiples, one position at a time)")
+    sp.add_argument("--side", choices=["long", "short"], default="long")
+    sp.add_argument("--lookback", type=int, default=30, help="days for the reference high (long) or low (short)")
+    sp.add_argument("--trigger", type=float, default=15, help="percent below the lookback high (long) or above the lookback low (short)")
+    stop = sp.add_mutually_exclusive_group(required=True)
+    stop.add_argument("--stop-pct", type=float, help="stop distance, percent of entry")
+    stop.add_argument("--stop-atr", type=float, help="stop distance as a multiple of the 14d ATR at entry")
+    target = sp.add_mutually_exclusive_group()
+    target.add_argument("--target-pct", type=float, help="target distance, percent of entry")
+    target.add_argument("--target-r", type=float, help="target as a multiple of the stop distance")
+    sp.add_argument("--leverage", type=float, required=True)
+    sp.add_argument("--horizon", type=int, help="time stop in days (default: config max_holding_days)")
+    sp.add_argument("--risk-pct", type=float, help="risk per trade for the compounded figure (default: config)")
+    sp.add_argument("--days", type=int, default=3000, help="daily candles to fetch")
 
     sp = add("watch", cmd_watch, "poll the price, check level alerts and open-position flags")
     sp.add_argument("--interval", type=float, default=60, help="seconds between polls")

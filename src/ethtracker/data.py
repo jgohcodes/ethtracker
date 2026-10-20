@@ -1,7 +1,8 @@
 """Price sources. Each returns a spot price and daily candles (UTC index; open/high/low/close/volume).
 
 Coinbase and Kraken use their public, unauthenticated REST endpoints. The CSV
-provider reads a local file, so everything works offline.
+provider reads a local file, so everything works offline. Prices are spot, not a
+perpetual's mark price, which is what liquidation actually uses.
 """
 
 from __future__ import annotations
@@ -64,14 +65,29 @@ def parse_kraken_ohlc(payload: dict) -> pd.DataFrame:
     return _frame(df)
 
 
+def parse_coinbase_spot(payload: dict) -> float:
+    """Prices API spot payload: {"data": {"amount": "...", "currency": "USD"}} (``base`` is not relied on)."""
+    try:
+        return float(payload["data"]["amount"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DataError(f"unexpected Coinbase price payload: {payload!r}") from exc
+
+
 class Coinbase:
+    """Spot from the Coinbase Prices API (public, no key); candles from Coinbase Exchange's public endpoint.
+
+    The Prices API returns a single price with no highs or lows, so it cannot feed ATR or
+    adverse-move statistics; those need candles.
+    """
+
     name = "coinbase"
+    spot_url = "https://api.coinbase.com/v2/prices/ETH-USD/spot"
     base = "https://api.exchange.coinbase.com"
     product = "ETH-USD"
     max_candles = 300
 
     def spot(self) -> float:
-        return float(_get_json(f"{self.base}/products/{self.product}/ticker")["price"])
+        return parse_coinbase_spot(_get_json(self.spot_url))
 
     def candles(self, days: int) -> pd.DataFrame:
         rows: list = []
