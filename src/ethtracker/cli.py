@@ -10,8 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
-from . import alerts, config, indicators, risk, study
+from . import advice, alerts, config, derivs, indicators, risk, signals, study
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -202,6 +203,153 @@ def cmd_snapshot(args, ctx: Ctx) -> int:
     return 0
 
 
+CANDLE_REFRESH_SECONDS = 300
+DERIV_SIGNALS = {"funding", "oi_change", "oi_level", "long_liquidations", "short_liquidations"}
+LEVEL_LABELS = [
+    ("sma_20", "20d"), ("sma_50", "50d"), ("sma_100", "100d"), ("sma_200", "200d"),
+    ("avwap_low", "AVWAP from the low"), ("avwap_year", "AVWAP from the year open"),
+    ("val", "value-area low"), ("poc", "point of control"), ("vah", "value-area high"),
+]
+
+
+def _derivs(args, ctx: Ctx) -> pd.DataFrame | None:
+    """Derivatives history: an explicit CSV, else what `record` has accumulated, else none."""
+    if args.derivs_csv:
+        return derivs.load_csv(args.derivs_csv)
+    path = derivs.recorded_path(ctx.home / "derivs", ctx.cfg.derivs_instrument)
+    return derivs.load_csv(path) if path.exists() else None
+
+
+def _signals(args, ctx: Ctx, df: pd.DataFrame, price: float) -> signals.SignalSet:
+    anchor = pd.Timestamp(args.anchor, tz="UTC") if getattr(args, "anchor", None) else None
+    return signals.compute(ctx.cfg, indicators.with_price(df, price), _derivs(args, ctx), anchor)
+
+
+def print_signals(sigs: signals.SignalSet) -> None:
+    def line(g: signals.Signal) -> str:
+        mark = {1: "+", -1: "-", 0: "·"}[g.bias] + ("!" if g.risk else " ")
+        return f"  {mark} {g.headline}" + ("  (unvalidated)" if g.unvalidated else "")
+
+    levels = [f"{label} {sigs.levels[key]:,.0f}" for key, label in LEVEL_LABELS if key in sigs.levels]
+    if levels:
+        print("Levels       " + "; ".join(levels))
+        print()
+    technical = [g for g in sigs.signals if g.name not in DERIV_SIGNALS]
+    derivative = [g for g in sigs.signals if g.name in DERIV_SIGNALS]
+    for title, group in (("Technical", technical), ("Derivatives", derivative)):
+        if group:
+            print(f"{title}  (+ bullish, - bearish, · neutral, ! raises the odds of a violent move)")
+            print("\n".join(line(g) for g in group))
+            print()
+    votes = sigs.votes()
+    by_family = ", ".join(f"{name} {vote:+d}" for name, vote in votes.items() if vote) or "none voting"
+    print(f"Net by family (each votes once, so correlated signals do not stack): {by_family}; total {sum(votes.values()):+d}")
+    print(f"Risk flags: {sum(g.risk for g in sigs.signals)}")
+    for note in sigs.notes:
+        print(f"  note: {note}")
+
+
+def cmd_signals(args, ctx: Ctx) -> int:
+    provider = _provider(args, ctx)
+    price = provider.spot()
+    sigs = _signals(args, ctx, provider.candles(args.days), price)
+    print(f"ETHUSD {usd(price)}   source: {provider.name}")
+    print("-" * 78)
+    print_signals(sigs)
+    return 0
+
+
+def _assess_all(args, ctx: Ctx, provider: Provider, price: float, df: pd.DataFrame | None = None):
+    """[(status, assessment)] for every open position at ``price``, plus the signal set used."""
+    now = datetime.now(timezone.utc)
+    df = provider.candles(args.days) if df is None else df
+    sigs = _signals(args, ctx, df, price)
+    statuses = [risk.mark_position(ctx.cfg, p, price, now) for p in ctx.journal.open_positions()]
+    book: tuple[str, ...] = ()
+    if statuses and ctx.journal.equity is not None:
+        book = risk.portfolio_status(ctx.cfg, ctx.journal.equity, ctx.journal.peak_equity, statuses).flags
+    priced = indicators.with_price(df, price)
+    return [(s, advice.assess(ctx.cfg, s.position, s, sigs, priced, book)) for s in statuses], sigs
+
+
+def print_assessment(status: risk.PositionStatus, a: advice.Assessment, max_days: int) -> None:
+    p = status.position
+    print(f"#{p.id} {p.side.upper()} {p.qty:.4f} ETH @ {usd(p.entry)}   mark {usd(status.price)}   {a.move:+.1%} from entry   "
+          f"uPnL {signed_usd(status.unrealized)}   held {status.days_held:.1f}/{max_days}d")
+    action = a.action + (f"  (close {a.suggested_fraction:.0%})" if a.action == "TAKE_PARTIAL" else "")
+    if a.suggested_stop is not None:
+        action += f"   suggested stop {usd(a.suggested_stop)} (now {usd(p.stop)})"
+    print(f"   ACTION: {action}")
+    for reason in a.reasons:
+        print(f"     why: {reason}")
+    print(f"   Signals: net {a.net_score:+d} by family vote, {a.risk_flags} risk flag(s)")
+    print("   Bull case:")
+    for item in a.bull_case or ("nothing supportive right now",):
+        print(f"     + {item}")
+    print("   Bear case:")
+    for item in a.bear_case or ("nothing flagged",):
+        print(f"     - {item}")
+
+
+def cmd_advise(args, ctx: Ctx) -> int:
+    positions = ctx.journal.open_positions()
+    if not positions:
+        print("No open positions.")
+        return 0
+    provider = _provider(args, ctx)
+    price = args.price if args.price is not None else provider.spot()
+    results, sigs = _assess_all(args, ctx, provider, price)
+    print(f"ETHUSD {usd(price)}   source: {provider.name}")
+    print("-" * 78)
+    for status, a in results:
+        print_assessment(status, a, ctx.cfg.max_holding_days)
+        print()
+    for note in sigs.notes:
+        print(f"note: {note}")
+    return 1 if any(a.action in ("EXIT", "TAKE_PARTIAL") for _, a in results) else 0
+
+
+def cmd_record(args, ctx: Ctx) -> int:
+    instrument = args.instrument or ctx.cfg.derivs_instrument
+    path = derivs.recorded_path(ctx.home / "derivs", instrument)
+    try:
+        while True:
+            row = derivs.fetch_deribit_snapshot(instrument)
+            wrote = derivs.append_snapshot(path, row)
+            print(f"{row['time']}  {instrument}  OI {row['open_interest']:,.0f}  funding/8h {row['funding_8h']:.4%}"
+                  f"{'' if wrote else '  (duplicate timestamp, skipped)'}")
+            if args.once:
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
+def cmd_signals_study(args, ctx: Ctx) -> int:
+    provider = _provider(args, ctx)
+    df = provider.candles(args.days)
+    horizon = args.horizon or ctx.cfg.max_holding_days
+    buckets = signals.warning_study(ctx.cfg, df, horizon)
+    print(f"Technical risk flags (stretched, RSI hot, volatility spike) versus what followed a long entered at that day's close")
+    print(f"Data: {len(df)} daily candles, {df.index[0]:%Y-%m-%d} to {df.index[-1]:%Y-%m-%d} ({provider.name}); horizon {horizon}d")
+    print("-" * 78)
+    print(f"  {'bucket':<10} {'n':>5} {'median return':>14} {'>=15% drawdown':>15} {'>=20% drawdown':>15} {'>=+10% rally':>13}")
+    for b in buckets:
+        print(f"  {b.label:<10} {b.n:>5} {b.median_return:>+14.1%} {b.drawdown_15:>15.0%} {b.drawdown_20:>15.0%} {b.rally_10:>13.0%}")
+    base = next((b for b in buckets if b.label == "all days"), None)
+    flagged = next((b for b in buckets if b.label == "2+ flags"), None)
+    print()
+    if base and flagged and base.drawdown_20 > 0:
+        print(f"2+ flags: a >=20% drawdown followed {flagged.drawdown_20:.0%} of the time versus {base.drawdown_20:.0%} for all days "
+              f"({flagged.drawdown_20 / base.drawdown_20:.1f}x), on {flagged.n} days. The rally column is the upside an early exit would have given up.")
+    elif base:
+        print("No qualifying 2+ flag days in this history.")
+    print("Windows overlap and flagged days cluster, so n overstates the independent evidence. Judge a lift by n, not just its size.")
+    print("Open interest, funding and liquidations are not tested here: free history of them is too short or absent.")
+    return 0
+
+
 def cmd_sync(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
     if not isinstance(provider, CachedProvider):
@@ -311,7 +459,9 @@ def cmd_study(args, ctx: Ctx) -> int:
 
 def cmd_watch(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
-    prev = start = None
+    prev = start = df = None
+    candles_at = float("-inf")
+    last_action: dict[int, str] = {}
     seen: set[tuple[int, str]] = set()
     try:
         while True:
@@ -335,10 +485,39 @@ def cmd_watch(args, ctx: Ctx) -> int:
                 if alerts.crossed(prev, price, level):
                     print(f"  ALERT price crossed below {usd(level)}" if price <= level else f"  ALERT price crossed above {usd(level)}")
                     fired = True
+            if args.record:
+                try:
+                    derivs.append_snapshot(
+                        derivs.recorded_path(ctx.home / "derivs", ctx.cfg.derivs_instrument),
+                        derivs.fetch_deribit_snapshot(ctx.cfg.derivs_instrument),
+                    )
+                except DataError as exc:
+                    print(f"warning: could not record derivatives data ({exc})", file=sys.stderr)
             statuses = [risk.mark_position(ctx.cfg, p, price, now) for p in ctx.journal.open_positions()]
+            results = []
+            if statuses:
+                if df is None or time.monotonic() - candles_at > CANDLE_REFRESH_SECONDS:
+                    candles_at = time.monotonic()
+                    try:
+                        df = provider.candles(args.days)
+                    except DataError as exc:
+                        print(f"warning: candles unavailable, no recommendations this poll ({exc})", file=sys.stderr)
+                if df is not None:
+                    results, _ = _assess_all(args, ctx, provider, price, df)
+            actions = {s.position.id: a for s, a in results}
             for s in statuses:
                 p = s.position
-                print(f"  #{p.id} {p.side} {signed_usd(s.unrealized)}  liq {pct(s.dist_to_liq)} away  stop {pct(s.dist_to_stop)} away  held {s.days_held:.1f}d")
+                liq = f"  liq {pct(s.dist_to_liq)} away" if ctx.cfg.margin_mode == "isolated" else ""
+                action = f"  -> {actions[p.id].action}" if p.id in actions else ""
+                print(f"  #{p.id} {p.side} {signed_usd(s.unrealized)}{liq}  stop {pct(s.dist_to_stop)} away  held {s.days_held:.1f}d{action}")
+            for s, a in results:
+                before = last_action.get(s.position.id)
+                if before != a.action:
+                    if a.action != "HOLD" or before is not None:  # a first sighting of HOLD is not news
+                        print(f"  ACTION CHANGE #{s.position.id}: {before or 'new'} -> {a.action}")
+                        print_assessment(s, a, ctx.cfg.max_holding_days)
+                        fired = True
+                    last_action[s.position.id] = a.action
             current = {(s.position.id, f) for s in statuses for f in s.flags}
             if statuses and ctx.journal.equity is not None:
                 port = risk.portfolio_status(ctx.cfg, ctx.journal.equity, ctx.journal.peak_equity, statuses)
@@ -504,6 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provider", choices=["coinbase", "kraken", "csv"], help="price source (default: config)")
     p.add_argument("--csv", type=Path, help="daily candles file for --provider csv")
     p.add_argument("--no-cache", action="store_true", help="bypass the local candle cache")
+    p.add_argument("--derivs-csv", type=Path, help="open interest / funding / liquidation history (default: what `record` has collected)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add(name, fn, help):
@@ -551,11 +731,32 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--risk-pct", type=float, help="risk per trade for the compounded figure (default: config)")
     sp.add_argument("--days", type=int, default=3000, help="daily candles to fetch")
 
+    sp = add("signals", cmd_signals, "technical overlays (trend, RSI, volatility, anchored VWAP, volume profile) and derivatives positioning")
+    sp.add_argument("--days", type=int, default=500, help="daily candles to use (the volume profile looks back 365)")
+    sp.add_argument("--anchor", help="anchor date (YYYY-MM-DD) for the anchored VWAP; default: the 365d low")
+
+    sp = add("advise", cmd_advise, "per open position: recommended action with the bull and bear case (exit 1 on EXIT/TAKE_PARTIAL)")
+    sp.add_argument("--days", type=int, default=500)
+    sp.add_argument("--anchor", help="anchor date (YYYY-MM-DD) for the anchored VWAP")
+    sp.add_argument("--price", type=float, help="use this price instead of fetching spot")
+
+    sp = add("record", cmd_record, "poll Deribit's public ticker and append open interest and funding to a local history")
+    sp.add_argument("--instrument", help="default: config derivs_instrument")
+    sp.add_argument("--interval", type=float, default=900, help="seconds between snapshots")
+    sp.add_argument("--once", action="store_true")
+
+    sp = add("signals-study", cmd_signals_study, "how the technical risk-flag count related to later drawdowns and rallies in history")
+    sp.add_argument("--horizon", type=int, help="days ahead (default: config max_holding_days)")
+    sp.add_argument("--days", type=int, default=3000)
+
     sp = add("watch", cmd_watch, "poll the price, check level alerts and open-position flags")
     sp.add_argument("--interval", type=float, default=60, help="seconds between polls")
     sp.add_argument("--above", type=float, action="append", help="alert when price crosses this level (repeatable)")
     sp.add_argument("--below", type=float, action="append", help="alert when price crosses this level (repeatable)")
     sp.add_argument("--once", action="store_true", help="check once and exit (for cron)")
+    sp.add_argument("--record", action="store_true", help="also append a Deribit open-interest/funding snapshot each poll")
+    sp.add_argument("--days", type=int, default=500, help="daily candles used for the signals")
+    sp.add_argument("--anchor", help="anchor date (YYYY-MM-DD) for the anchored VWAP; default: the 365d low")
 
     def trade_args(sp, entry_required: bool):
         sp.add_argument("--side", choices=["long", "short"], required=True)

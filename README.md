@@ -21,7 +21,11 @@ State lives in `~/.ethtracker` (override with `ETHTRACKER_HOME`): `config.toml` 
 | `size` | Sizes a trade from its stop and your remaining headroom, tests it against your rules, prints price scenarios and history (plus a leverage ladder under isolated margin). **Exit code 1 if blocked** |
 | `open` / `close` | Record a position you took / closed. `open` refuses rule-breaking plans unless `--force` (which is written into the note) |
 | `risk` | Marks open positions to market: PnL, liquidation distance, stop distance, funding accrued, time held, portfolio open risk and drawdown. **Exit code 1 if any flag is raised** |
-| `watch` | Polls the price; fires once on level crossings (`--above`, `--below`) and on position flags (`STOP_HIT`, `LIQ_DANGER`, `TIME_STOP`, ...). `--once` for cron |
+| `signals` | Trend, RSI, volatility, anchored VWAP, volume-profile point of control, and (when recorded or supplied) open-interest, funding and liquidation positioning. See [Signals and recommended actions](#signals-and-recommended-actions) |
+| `advise` | Per open position: a recommended action (HOLD, TIGHTEN, TAKE_PARTIAL, EXIT), the bull case, the bear case and why the rule fired. **Exit code 1 on EXIT or TAKE_PARTIAL** |
+| `record` | Polls Deribit's public ticker and appends open interest and funding to a local history, which is what makes the open-interest signals possible |
+| `signals-study` | Tests the candle-derived risk flags against history: what followed days with 0, 1, 2+ flags |
+| `watch` | Polls the price; fires once on level crossings (`--above`, `--below`) and on position and whole-book flags. With open positions it recomputes each recommended action every poll and announces only when one changes. `--record` also logs derivatives data; `--once` for cron |
 | `equity`, `history` | Show/set equity; closed trades with R-multiples |
 
 ```
@@ -79,6 +83,40 @@ Three things to understand before relying on it:
 
 It ignores fees, funding, basis, tiered maintenance margin and venue liquidation fees, so real room is smaller.
 
+## Signals and recommended actions
+
+`signals` prints conditions at the latest candle. Each has a direction for price (`+`, `-`, `·`) and, where relevant, a risk flag (`!`) for conditions that raise the odds of a violent move in either direction:
+
+| Family | Signals |
+|---|---|
+| levels | 20d vs 50d trend; price vs the 200d; anchored VWAP from the 365-day low (or `--anchor DATE`) and from the year open; the 365-day volume-profile point of control and value area |
+| momentum | RSI overbought/oversold and a rollover from overbought; extension (std devs above the 20d mean) |
+| volume | volume on down days vs up days over 10 days |
+| volatility (risk flag only) | 7d/30d realised volatility, ATR against its 180-day median, or the latest range as a multiple of ATR |
+| derivatives | funding per 8h; 24h open-interest change against price; open-interest percentile; long and short liquidation spikes |
+
+Correlated signals share a family and vote once, so "below the 20d, 50d, 200d, both VWAPs and the POC" is one bearish vote, not six. Anchored VWAP and the volume profile are built from daily candles (each day's volume spread evenly over its range), so they are coarser than tick or intraday versions, and neither is on-chain data.
+
+`advise` turns the signals into a recommended action per open position, with the **bull case** (what supports holding), the **bear case** (what argues against, including every risk flag) and the reasons the rule fired. `watch` recomputes it every poll and announces only when the action changes.
+
+| Action | Fires on (first match wins) |
+|---|---|
+| EXIT | stop breached; time stop; book at or near liquidation; deep in the money with at least `exit_risk_flags` (2) risk flags |
+| TAKE_PARTIAL (close 50%, trail the rest) | book outside the stress rule; deep in the money (at least `deep_itm_pct`, 10%) with any risk flag or a bearish net vote; in profit with 2+ risk flags and no net support |
+| TIGHTEN | in profit with any risk flag or a bearish net vote; deep in the money with the bull case intact (trail only) |
+| HOLD | otherwise, including an underwater position whose signals are deteriorating (honour the stop, do not add) |
+
+The suggested stop is a chandelier: `trail_atr_multiple` (3) ATRs behind the best price since entry, or breakeven once a full ATR in profit. It never loosens a stop.
+
+**"Automatic" means alert, not order.** Nothing here places an order. This decision engine is what a bot would call, but execution needs an exchange adapter that does not exist and should only follow paper trading.
+
+What to trust:
+
+- **Every threshold is a starting hypothesis** (`config.toml`). The derivatives signals are marked *(unvalidated)*: free history of open interest and liquidations is too short or absent to test them. "Funding above 0.05% per 8h is a high-accuracy short trigger" and "a long-liquidation spike marks the exact bottom" are folk rules, not tested here. Funding can stay elevated through a long trend, and a liquidation spike can be the first of several.
+- **`signals-study` tests the candle-only flags** (stretched, RSI hot, volatility spike): for each flag count, how often a 15% or 20% drawdown followed within the horizon versus all days, and how often a 10% rally followed, which is the upside an early exit gives up. Read the `n` column: flagged days are few and cluster, and small samples make noise look like signal. Run it on real history before believing that these flags "exit before the big candle".
+- **Expect false exits.** A warning is at best a shift in odds, and each false exit costs upside.
+- **Derivatives data is a snapshot, not a history.** Deribit's public ticker gives the current open interest and funding, so `record` builds the history: funding works immediately, the 24h open-interest change needs 24 hours of recording, and the percentile needs 30 days. There is no complete free liquidation feed (Binance's stream pushes at most one liquidation per symbol per second), so liquidation signals appear only if you pass `--derivs-csv` with `long_liq_usd` / `short_liq_usd` columns from a data vendor. `--derivs-csv` also accepts `open_interest`, `funding_8h` and the other columns from any source, with `time` or `date` as the first column.
+
 ## Testing a pullback rule
 
 `study` encodes "buy a large pullback, sell the bounce" as a rule and replays it over history:
@@ -105,7 +143,10 @@ Free, keyless sources:
 | Spot price | Coinbase Prices API | a single price, no highs or lows |
 | Daily open/high/low/close/volume | Coinbase Exchange public candles, ETH-USD | 300 candles per request, paged to the days you ask for |
 | SMA 20/50/100/200, RSI, ATR, volatility, volume average | computed locally (`indicators.py`) | no free API serves these dependably; computing them from candles keeps them consistent, unmetered and auditable |
+| Open interest and funding | Deribit public ticker, polled by `ethtracker record` | snapshots only; history accrues from the day you start |
 | Alternatives | Kraken OHLC (last 720 days), your own CSV | `--provider kraken` / `--provider csv --csv FILE` |
+
+Binance is not used. Its ETHUSDT market is USDT-quoted rather than USD, open interest and funding are venue-specific so they should come from the venue you trade, and its liquidation stream is a one-per-second snapshot. The "pull raw candles and compute indicators yourself" approach is what this tool already does; RSI and ATR match Wilder's published recursions (within 2e-5 after the seeding transient) and the SMAs match exactly.
 
 `ethtracker sync` downloads once into `~/.ethtracker/candles/`. Every later command reads that cache and fetches only the gap (`--no-cache` bypasses it, and a failed refresh falls back to the cache with a warning). `ethtracker export --out eth.csv` writes the whole series with every metric for another app. Volume is in ETH, and the latest day is partial until it closes.
 
@@ -124,6 +165,7 @@ Free, keyless sources:
 
 `risk.py` is pure (no I/O) on purpose: `plan_position` is the gate a bot would call before every order, and `mark_position` / `portfolio_status` are its kill-switch checks. What is missing, in order:
 
+0. **Automatic exits**: `advise` already produces EXIT and TAKE_PARTIAL with reasons. Acting on them automatically needs steps 1 to 4 below, in particular a paper-trading period that shows the exit rules help rather than just trade less.
 1. **Backtester**: `study` is the first cut (same sizing, liquidation, fee and funding functions, daily bars, one position). A proper one adds intraday candles for stop/target ordering, slippage, walk-forward validation and a rule set you have committed to before looking at results. Nothing should trade live that has not survived this.
 2. **Strategy interface**: `(candles, state) -> intent`, with the risk gate between intent and order.
 3. **Paper broker**, run for weeks against live prices.

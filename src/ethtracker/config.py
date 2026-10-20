@@ -35,6 +35,19 @@ class Config:
     taker_fee_rate: float = 0.0005
     funding_rate_8h: float = 0.0001
     margin_mode: str = "cross"
+    rsi_overbought: float = 70.0
+    rsi_oversold: float = 30.0
+    extension_z: float = 2.0
+    vol_spike_ratio: float = 1.5
+    range_spike_atr: float = 2.0
+    oi_spike_pct: float = 10.0
+    oi_high_percentile: float = 90.0
+    funding_hot_8h: float = 0.0005
+    liq_spike_z: float = 2.0
+    deep_itm_pct: float = 10.0
+    exit_risk_flags: int = 2
+    trail_atr_multiple: float = 3.0
+    derivs_instrument: str = "ETH-PERPETUAL"
     provider: str = "coinbase"
 
     def __post_init__(self):
@@ -44,6 +57,19 @@ class Config:
 
 COMMENTS = {
     "margin_mode": "cross: one balance backs every position; isolated: each position has its own margin. Confirm on your account",
+    "rsi_overbought": "RSI at or above this is a bearish signal for longs",
+    "rsi_oversold": "RSI at or below this is a bullish signal for longs",
+    "extension_z": "Std devs from the 20d mean at which price counts as stretched (a risk flag)",
+    "vol_spike_ratio": "Volatility counts as spiking when 7d/30d realised vol, or ATR/its 180d median, reaches this ratio (a risk flag)",
+    "range_spike_atr": "Also a volatility spike when the latest candle's range is this many prior ATRs",
+    "oi_spike_pct": "A 24h open-interest change of this size (%) is a spike",
+    "oi_high_percentile": "Open interest at or above this percentile of its recorded history is crowded (a risk flag; needs 30 days)",
+    "funding_hot_8h": "Funding per 8h beyond +/- this is crowded (0.0005 = 0.05%). A folk threshold, not a validated one",
+    "liq_spike_z": "A day's liquidations this many std devs above the trailing mean is a spike (needs a liquidation feed)",
+    "deep_itm_pct": "A position this far (%) in profit from entry is 'deep in the money' and gets profit-protection rules",
+    "exit_risk_flags": "Deep in the money plus this many risk flags recommends EXIT",
+    "trail_atr_multiple": "Suggested trailing stop sits this many ATRs from the best price since entry",
+    "derivs_instrument": "Deribit instrument whose open interest and funding the recorder polls",
     "risk_per_trade_pct": "Max loss if the stop is hit, % of equity (fees included)",
     "max_open_risk_pct": "Cap on summed loss-to-stop across all open positions, % of equity",
     "max_leverage": "Hard cap on the exchange leverage setting",

@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import pytest
 
-from ethtracker import config, indicators
+from ethtracker import config, data, derivs, indicators
 from ethtracker.cli import main
 
 
@@ -170,6 +170,167 @@ def test_headroom_is_an_error_when_the_rule_is_off(capsys, funded):
     (config.home() / "config.toml").write_text("stress_drop_pct = 0.0\n")
     assert main(["headroom", "--price", "3000"]) == 2
     assert "stress rule is off" in capsys.readouterr().err
+
+
+@pytest.fixture
+def derivs_csv(tmp_path):
+    path = tmp_path / "derivs.csv"
+    idx = pd.date_range("2026-09-01", periods=40, freq="D", tz="UTC")
+    frame = pd.DataFrame({"open_interest": [100.0 + i for i in range(40)], "funding_8h": [0.0001] * 39 + [0.0007]}, index=idx)
+    frame.index = frame.index.strftime("%Y-%m-%d")
+    frame.to_csv(path, index_label="date")
+    return path
+
+
+def open_long(capsys, entry):
+    code, _ = run(capsys, "open", "--side", "long", "--entry", entry, "--stop", entry * 0.96, "--leverage", 5, "--no-history")
+    assert code == 0
+
+
+def test_signals_prints_levels_both_groups_and_the_data_gaps(capsys, candles_csv):
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "signals", "--days", 500)
+    assert code == 0
+    for text in ("Levels", "AVWAP from the low", "point of control", "Technical", "Net by family", "Risk flags:",
+                 "note: no derivatives data"):
+        assert text in out
+    assert "Derivatives  (" not in out
+
+
+def test_signals_shows_derivatives_flagged_unvalidated_when_given_a_csv(capsys, candles_csv, derivs_csv):
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "--derivs-csv", derivs_csv, "signals")
+    assert "Derivatives" in out
+    assert "Funding 0.070% per 8h" in out and "crowded" in out and "(unvalidated)" in out
+    assert "percentile of its 40-day history" in out
+
+
+def test_signals_accepts_an_anchor_date(capsys, candles_csv):
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "signals", "--anchor", "2025-06-01")
+    assert "the chosen anchor (2025-06-01)" in out
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "signals", "--anchor", "not-a-date"]) == 2
+
+
+def test_advise_with_no_positions(capsys, funded, candles_csv):
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "advise")
+    assert code == 0 and "No open positions" in out
+
+
+def test_advise_exits_a_position_through_its_stop_with_both_cases(capsys, funded, candles_csv):
+    open_long(capsys, 3000)  # the csv price is ~$292
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "advise")
+    assert code == 1 and "ACTION: EXIT" in out
+    assert "why: Stop" in out and "Bull case" in out and "Bear case" in out
+
+
+def test_advise_takes_profit_on_a_deep_in_the_money_position_when_signals_are_bearish(capsys, funded, candles_csv):
+    open_long(capsys, 250)  # csv price ~$292 is ~17% above entry; the synthetic tape is in a downtrend
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "advise")
+    assert code == 1
+    assert "ACTION: TAKE_PARTIAL  (close 50%)" in out or "ACTION: EXIT" in out
+    assert "Deep in the money" in out
+
+
+def test_advise_tightens_a_modest_profit_when_net_signals_are_bearish(capsys, funded, candles_csv):
+    open_long(capsys, 285)  # ~+2% in profit, not deep
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "advise")
+    assert "ACTION: TIGHTEN" in out and code == 0
+
+
+def test_record_appends_a_snapshot_and_skips_a_repeat(capsys, funded, monkeypatch):
+    row = derivs.parse_deribit_ticker({"result": {"open_interest": 1000.0, "funding_8h": 0.0002, "timestamp": 1760961600000}})
+    monkeypatch.setattr(derivs, "fetch_deribit_snapshot", lambda instrument: row)
+    code, out = run(capsys, "record", "--once")
+    assert code == 0 and "ETH-PERPETUAL" in out and "OI 1,000" in out and "0.0200%" in out
+    path = derivs.recorded_path(config.home() / "derivs", "ETH-PERPETUAL")
+    assert len(path.read_text().splitlines()) == 2
+    code, out = run(capsys, "record", "--once")
+    assert "duplicate timestamp" in out and len(path.read_text().splitlines()) == 2
+
+
+def test_recorded_history_feeds_the_signals_automatically(capsys, funded, candles_csv):
+    path = derivs.recorded_path(config.home() / "derivs", "ETH-PERPETUAL")
+    derivs.append_snapshot(path, derivs.parse_deribit_ticker({"result": {"open_interest": 1000.0, "funding_8h": 0.0008, "timestamp": 1760961600000}}))
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "signals")
+    assert "Funding 0.080% per 8h" in out and "longs paying heavily" in out
+
+
+def test_signals_study_prints_buckets_and_the_caveats(capsys, candles_csv):
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "signals-study", "--days", 500)
+    assert code == 0
+    for text in ("all days", "2+ flags", "horizon 14d", "Windows overlap", "not tested here"):
+        assert text in out
+
+
+class SequenceProvider:
+    """Replays a list of spot prices over fixed candles, to drive `watch` through several polls."""
+
+    name = "fake"
+
+    def __init__(self, prices, candles):
+        self.prices, self.frame, self.polls = list(prices), candles, 0
+
+    def spot(self):
+        price = self.prices[min(self.polls, len(self.prices) - 1)]
+        self.polls += 1
+        return price
+
+    def candles(self, days):
+        return self.frame.tail(days)
+
+
+def watch_polls(monkeypatch, capsys, candles, prices, *extra):
+    provider = SequenceProvider(prices, candles)
+    monkeypatch.setattr("ethtracker.cli.get_provider", lambda name, csv_path=None: provider)
+    sleeps = []
+
+    def sleeper(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= len(prices):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleeper)
+    code = main(["watch", "--interval", "1", *extra])
+    return code, capsys.readouterr().out
+
+
+def test_watch_announces_an_action_change_once_not_on_every_poll(capsys, monkeypatch, funded, candles):
+    open_long(capsys, 250)
+    code, out = watch_polls(monkeypatch, capsys, candles, [245.0, 245.0, 291.0])
+    assert code == 0
+    assert out.count("ACTION CHANGE") == 1  # HOLD while underwater, then deep in the money
+    change = next(line for line in out.splitlines() if "ACTION CHANGE" in line)
+    assert "HOLD ->" in change and ("TAKE_PARTIAL" in change or "EXIT" in change)
+    assert "ACTION:" in out and "Bull case" in out and "Bear case" in out
+    polls = [line for line in out.splitlines() if line.startswith("  #1 long")]
+    assert len(polls) == 3 and polls[0].endswith("-> HOLD") and "->" in polls[2]
+
+
+def test_watch_stays_quiet_about_a_position_that_holds(capsys, monkeypatch, funded, candles):
+    open_long(capsys, 250)
+    code, out = watch_polls(monkeypatch, capsys, candles, [245.0, 246.0, 247.0])
+    assert "ACTION CHANGE" not in out and out.count("-> HOLD") == 3
+
+
+def test_watch_alerts_immediately_when_the_first_sighting_is_an_exit(capsys, monkeypatch, funded, candles):
+    open_long(capsys, 3000)
+    code, out = watch_polls(monkeypatch, capsys, candles, [291.0])
+    assert "ACTION CHANGE #1: new -> EXIT" in out
+
+
+def test_watch_record_appends_a_derivatives_snapshot_each_poll(capsys, monkeypatch, funded, candles):
+    rows = iter(derivs.parse_deribit_ticker({"result": {"open_interest": 1000.0 + i, "funding_8h": 0.0001, "timestamp": 1760961600000 + i * 3600000}}) for i in range(5))
+    monkeypatch.setattr(derivs, "fetch_deribit_snapshot", lambda instrument: next(rows))
+    watch_polls(monkeypatch, capsys, candles, [291.0, 292.0], "--record")
+    path = derivs.recorded_path(config.home() / "derivs", "ETH-PERPETUAL")
+    assert len(path.read_text().splitlines()) == 3  # header plus one row per poll
+
+
+def test_watch_survives_a_failed_derivatives_record(capsys, monkeypatch, funded, candles):
+    def boom(instrument):
+        raise data.DataError("offline")
+
+    monkeypatch.setattr(derivs, "fetch_deribit_snapshot", boom)
+    code, out = watch_polls(monkeypatch, capsys, candles, [291.0], "--record")
+    assert code == 0 and "ETHUSD" in out
 
 
 def test_study_from_csv_prints_trades_summary_and_caveats(capsys, candles_csv):

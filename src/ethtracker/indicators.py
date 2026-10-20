@@ -107,13 +107,19 @@ def _ret(close: pd.Series, n: int) -> float | None:
     return float(close.iloc[-1] / close.iloc[-1 - n] - 1) if len(close) > n else None
 
 
-def snapshot(df: pd.DataFrame, price: float | None = None) -> Snapshot:
-    """Indicator summary. ``price`` replaces the last close when a fresher quote is available."""
+def with_price(df: pd.DataFrame, price: float | None) -> pd.DataFrame:
+    """Copy of ``df`` whose latest candle reflects a fresher quote (close, and high/low if exceeded)."""
     df = df.copy()
     if price is not None:
         df.iloc[-1, df.columns.get_loc("close")] = price
         df.iloc[-1, df.columns.get_loc("high")] = max(df["high"].iloc[-1], price)
         df.iloc[-1, df.columns.get_loc("low")] = min(df["low"].iloc[-1], price)
+    return df
+
+
+def snapshot(df: pd.DataFrame, price: float | None = None) -> Snapshot:
+    """Indicator summary. ``price`` replaces the last close when a fresher quote is available."""
+    df = with_price(df, price)
     close = df["close"]
     last = float(close.iloc[-1])
     atr_14 = _last(atr(df, 14))
