@@ -14,6 +14,7 @@ import numpy as np
 from . import alerts, config, indicators, risk, study
 from .data import DataError, Provider, get_provider
 from .journal import Journal
+from .store import CachedProvider
 
 
 class CliError(Exception):
@@ -44,7 +45,11 @@ def na(x, fmt) -> str:
 
 
 def _provider(args, ctx: Ctx) -> Provider:
-    return get_provider(args.provider or ctx.cfg.provider, args.csv)
+    """The configured source; network sources go through the local candle cache unless --no-cache."""
+    provider = get_provider(args.provider or ctx.cfg.provider, args.csv)
+    if provider.name == "csv" or args.no_cache:
+        return provider
+    return CachedProvider(provider, ctx.home / "candles")
 
 
 def _equity(args, ctx: Ctx) -> float:
@@ -76,7 +81,7 @@ def history_lines(df, side: str, horizon: int, stop_dist: float | None = None, l
     return lines
 
 
-def print_plan(plan: risk.SizePlan, equity: float) -> None:
+def print_plan(plan: risk.SizePlan, equity: float, cross: bool) -> None:
     arrow = "LONG" if plan.side == "long" else "SHORT"
     target = f"  target {usd(plan.target)}" if plan.target else ""
     print(f"ETHUSD {arrow} @ {plan.leverage:g}x   entry {usd(plan.entry)}  stop {usd(plan.stop)}{target}")
@@ -84,8 +89,16 @@ def print_plan(plan: risk.SizePlan, equity: float) -> None:
     print(f"Size         {plan.qty:.4f} ETH   notional {usd(plan.notional)}   margin {usd(plan.margin)} ({pct(plan.margin_pct_equity)} of equity)")
     print(f"Exposure     {plan.effective_leverage:.2f}x equity (notional / equity), equity {usd(equity)}")
     print(f"Risk         loss at stop {usd(plan.risk_usd)} = {pct(plan.risk_pct, 2)} of equity (fees {usd(plan.fees_at_stop_usd)} included)")
-    print(f"Liquidation  {usd(plan.liq_price)} ({pct(plan.liq_dist)} from entry); stop is {pct(plan.stop_dist)} away = {pct(plan.stop_fraction_of_liq, 0)} of that distance")
-    print(f"Max leverage for this stop: {plan.max_leverage_for_stop:.1f}x")
+    if cross:
+        print(f"Liquidation  cross margin: set by the whole book, not this position (see Stress). Isolated-margin equivalent at {plan.leverage:g}x: {usd(plan.liq_price)}")
+    else:
+        print(f"Liquidation  {usd(plan.liq_price)} ({pct(plan.liq_dist)} from entry); stop is {pct(plan.stop_dist)} away = {pct(plan.stop_fraction_of_liq, 0)} of that distance")
+        print(f"Max leverage for this stop: {plan.max_leverage_for_stop:.1f}x")
+    if plan.stress_move:
+        fall = "fall" if plan.side == "long" else "rise"
+        room = f"; room before it: {usd(plan.stress_headroom_usd, 0)} notional" if cross else ""
+        capped = "  [size capped by this rule]" if plan.stress_capped else ""
+        print(f"Stress       a {abs(plan.stress_move):.0%} {fall} loses {pct(plan.stress_loss_pct, 0)} of equity with this trade added{room}{capped}")
     if plan.stop_atr_multiple is not None:
         print(f"Stop width   {plan.stop_atr_multiple:.1f}x the 14d ATR")
     direction = "paid" if plan.funding_usd >= 0 else "received"
@@ -105,12 +118,13 @@ def print_verdict(plan: risk.SizePlan) -> None:
             print(f"  - {v}")
 
 
-def print_ladder(cfg: config.Config, equity: float, args, entry: float, open_risk: float) -> None:
+def print_ladder(cfg: config.Config, equity: float, args, entry: float, open_risk: float, holdings) -> None:
     print("Leverage ladder for this stop (same risk budget; only margin and liquidation move; liquidation rules only):")
     print(f"  {'lev':>5} {'margin':>12} {'liq price':>12} {'liq dist':>9} {'stop/liq':>9}  verdict")
     for lev in (3, 5, 7, 10, 12, 15):
         p = risk.plan_position(cfg, equity, args.side, entry, args.stop, lev, target=args.target,
-                               risk_pct=args.risk_pct, hold_days=args.hold_days, open_risk_usd=open_risk)
+                               risk_pct=args.risk_pct, hold_days=args.hold_days, open_risk_usd=open_risk,
+                               holdings=holdings)
         marker = "ok" if p.ok else "blocked"
         print(f"  {lev:>4}x {usd(p.margin):>12} {usd(p.liq_price):>12} {pct(p.liq_dist):>9} {pct(p.stop_fraction_of_liq, 0):>9}  {marker}")
 
@@ -173,7 +187,9 @@ def cmd_snapshot(args, ctx: Ctx) -> int:
     print(f"Returns      7d {na(snap.ret_7d, lambda x: f'{x:+.1%}')}   30d {na(snap.ret_30d, lambda x: f'{x:+.1%}')}   90d {na(snap.ret_90d, lambda x: f'{x:+.1%}')}")
     print(f"SMA 20       {vs(snap.sma_20)}")
     print(f"SMA 50       {vs(snap.sma_50)}")
+    print(f"SMA 100      {vs(snap.sma_100)}")
     print(f"SMA 200      {vs(snap.sma_200)}")
+    print(f"Volume       {na(snap.volume_avg_20, lambda avg: f'{snap.volume:,.0f} ETH in the latest (possibly partial) day, 20d average {avg:,.0f} ETH')}")
     print(f"RSI 14       {na(snap.rsi_14, lambda x: f'{x:.1f}')}")
     print(f"ATR 14       {na(snap.atr_14, usd)} = {na(snap.atr_14_pct, pct)} of price (typical daily range)")
     print(f"Volatility   30d realised {na(snap.vol_30d, pct)} annualised, typical 1-day move {na(snap.daily_sigma, pct)}")
@@ -183,6 +199,63 @@ def cmd_snapshot(args, ctx: Ctx) -> int:
     for side in ("long", "short"):
         for line in history_lines(df, side, ctx.cfg.max_holding_days):
             print(line)
+    return 0
+
+
+def cmd_sync(args, ctx: Ctx) -> int:
+    provider = _provider(args, ctx)
+    if not isinstance(provider, CachedProvider):
+        raise CliError("sync fills the local cache from a network provider: use coinbase or kraken, without --no-cache")
+    df = provider.candles(args.days)
+    print(f"{provider.name}: {len(df)} daily candles, {df.index[0]:%Y-%m-%d} to {df.index[-1]:%Y-%m-%d}")
+    print(f"cache: {provider.path}")
+    return 0
+
+
+def cmd_export(args, ctx: Ctx) -> int:
+    out = indicators.frame(_provider(args, ctx).candles(args.days))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(args.out, index_label="date")
+    print(f"wrote {len(out)} rows to {args.out}: date, {', '.join(out.columns)}")
+    return 0
+
+
+def cmd_headroom(args, ctx: Ctx) -> int:
+    cfg = ctx.cfg
+    if cfg.stress_drop_pct <= 0:
+        raise CliError("the stress rule is off (stress_drop_pct = 0 in config.toml)")
+    if cfg.margin_mode != "cross":
+        a, m = cfg.stress_drop_pct / 100, cfg.maintenance_margin_rate
+        raise CliError(
+            f"headroom pools your balance across positions, which only applies to cross margin. With isolated margin "
+            f"spare balance does not protect a position: keep each position's leverage <= "
+            f"{risk.max_leverage_for_distance(args.side, a, m, 1.0):.1f}x to survive a {a:.0%} move, "
+            f"or set margin_mode = \"cross\" if your balance backs every position."
+        )
+    equity = _equity(args, ctx)
+    price = args.price if args.price is not None else _provider(args, ctx).spot()
+    holdings = ctx.journal.open_positions()
+    total = risk.total_equity(equity, holdings, price)
+    if total <= 0:
+        raise CliError("equity plus open PnL is not positive at this price")
+    net, gross = risk.exposure(holdings, price)
+    a, m = cfg.stress_drop_pct / 100, cfg.maintenance_margin_rate
+    s = 1 if args.side == "long" else -1
+
+    print(f"ETHUSD {usd(price)}   equity {usd(equity)} + open PnL {signed_usd(total - equity)} = {usd(total)}")
+    print("-" * 78)
+    print(f"Holdings     gross {usd(gross, 0)} = {gross / total:.2f}x equity, net {signed_usd(net)}")
+    for move in (-a, a):
+        st = risk.stress_at(total, net, gross, move, m)
+        print(f"  {move:+.0%}: equity {usd(st.equity_after, 0)}, {'loss' if st.loss_pct >= 0 else 'gain'} {pct(abs(st.loss_pct), 0)} of equity, margin limit {'holds' if st.survives else 'BREACHED'}")
+    room = risk.max_additional_notional(cfg, total, net, gross, args.side)
+    print(f"Room         up to {usd(room, 0)} more {args.side} notional = {room / price:.4f} ETH at {usd(price)}")
+    full = risk.stress_at(total, net + s * room, gross + room, -s * a, m)
+    print(f"  using all of it, a {a:.0%} {'fall' if s == 1 else 'rise'} leaves {usd(full.equity_after, 0)}: {pct(full.loss_pct, 0)} of equity lost")
+    liq = risk.account_liquidation_price(total, holdings, price, m)
+    if liq is not None:
+        print(f"Whole-book liquidation today (cross margin): {usd(liq)} ({pct(abs(1 - liq / price))} from here)")
+    print("Fees, funding, basis and venue liquidation fees are not included, so real room is smaller.")
     return 0
 
 
@@ -267,8 +340,11 @@ def cmd_watch(args, ctx: Ctx) -> int:
                 p = s.position
                 print(f"  #{p.id} {p.side} {signed_usd(s.unrealized)}  liq {pct(s.dist_to_liq)} away  stop {pct(s.dist_to_stop)} away  held {s.days_held:.1f}d")
             current = {(s.position.id, f) for s in statuses for f in s.flags}
+            if statuses and ctx.journal.equity is not None:
+                port = risk.portfolio_status(ctx.cfg, ctx.journal.equity, ctx.journal.peak_equity, statuses)
+                current |= {(0, f) for f in port.flags}  # id 0 = the whole book
             for pid, flag in sorted(alerts.new_flags(seen, current)):
-                print(f"  ALERT #{pid} {flag}")
+                print(f"  ALERT {'portfolio' if pid == 0 else f'#{pid}'} {flag}")
                 fired = True
             if fired:
                 print("\a", end="", flush=True)
@@ -295,10 +371,15 @@ def cmd_size(args, ctx: Ctx) -> int:
     plan = risk.plan_position(
         ctx.cfg, equity, args.side, entry, args.stop, args.leverage, target=args.target,
         risk_pct=args.risk_pct, hold_days=args.hold_days, open_risk_usd=open_risk, atr_pct=_atr_pct(df),
+        holdings=ctx.journal.open_positions(),
     )
-    print_plan(plan, equity)
+    cross = ctx.cfg.margin_mode == "cross"
+    print_plan(plan, equity, cross)
     print()
-    print_ladder(ctx.cfg, equity, args, entry, open_risk)
+    if cross:
+        print("Cross margin: the exchange leverage setting does not move your liquidation price; the whole-book stress above does.")
+    else:
+        print_ladder(ctx.cfg, equity, args, entry, open_risk, ctx.journal.open_positions())
     print()
     print("Price scenarios (move from entry):")
     for s in risk.scenarios(plan, equity):
@@ -320,8 +401,9 @@ def cmd_open(args, ctx: Ctx) -> int:
     plan = risk.plan_position(
         ctx.cfg, equity, args.side, args.entry, args.stop, args.leverage, target=args.target,
         risk_pct=args.risk_pct, qty=args.qty, open_risk_usd=open_risk, atr_pct=_atr_pct(df),
+        holdings=ctx.journal.open_positions(),
     )
-    print_plan(plan, equity)
+    print_plan(plan, equity, ctx.cfg.margin_mode == "cross")
     print_verdict(plan)
     if not plan.ok and not args.force:
         print("Not recorded. Fix the plan or pass --force to record it anyway.")
@@ -380,7 +462,8 @@ def cmd_risk(args, ctx: Ctx) -> int:
         p = s.position
         target = f"  target {usd(p.target)}" if p.target else ""
         print(f"#{p.id} {p.side.upper()} {p.qty:.4f} ETH @ {usd(p.entry)}  {p.leverage:g}x  stop {usd(p.stop)}{target}  held {s.days_held:.1f}/{ctx.cfg.max_holding_days}d")
-        print(f"   uPnL {signed_usd(s.unrealized)} ({s.unrealized / p.margin:+.1%} of margin)   liq {usd(s.liq_price)} ({pct(s.dist_to_liq)} away)   stop {pct(s.dist_to_stop)} away   funding ~{usd(s.funding_accrued)}")
+        liq = f"   liq {usd(s.liq_price)} ({pct(s.dist_to_liq)} away)" if ctx.cfg.margin_mode == "isolated" else ""
+        print(f"   uPnL {signed_usd(s.unrealized)} ({s.unrealized / p.margin:+.1%} of margin){liq}   stop {pct(s.dist_to_stop)} away   funding ~{usd(s.funding_accrued)}")
         print(f"   loss to stop from here {usd(s.loss_to_stop_usd)}" + (f"   FLAGS: {', '.join(s.flags)}" if s.flags else ""))
         if p.note:
             print(f"   note: {p.note}")
@@ -389,6 +472,12 @@ def cmd_risk(args, ctx: Ctx) -> int:
     print(f"Equity {usd(port.equity)} + uPnL {signed_usd(port.unrealized)} = {usd(port.total_equity)}   drawdown from peak {pct(port.drawdown)}")
     print(f"Margin {usd(port.margin_used)} ({pct(port.margin_utilisation)} of equity)   gross {usd(port.gross_notional)} = {port.effective_leverage:.2f}x   net {signed_usd(port.net_notional)}")
     print(f"Open risk to stops {usd(port.open_risk_usd)} = {pct(port.open_risk_pct, 2)} of equity (limit {ctx.cfg.max_open_risk_pct:g}%)")
+    if ctx.cfg.stress_drop_pct > 0:
+        verdict = "holds" if port.stress_survives else "BREACHED"
+        room = f"; room to add {usd(port.headroom_notional, 0)} notional" if ctx.cfg.margin_mode == "cross" else ""
+        print(f"Stress {ctx.cfg.stress_drop_pct:g}%: worst case loses {pct(port.stress_loss_pct, 0)} of equity, margin limit {verdict}{room}")
+        if port.account_liq_price is not None:
+            print(f"Whole-book liquidation (cross margin): {usd(port.account_liq_price)} ({pct(abs(1 - port.account_liq_price / price))} from here)")
     flags = list(port.flags) + [f"#{s.position.id} {f}" for s in statuses for f in s.flags]
     if flags:
         print(f"FLAGS: {', '.join(flags)}")
@@ -414,6 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ethtracker", description="ETH-USD tracker, position sizing and risk journal")
     p.add_argument("--provider", choices=["coinbase", "kraken", "csv"], help="price source (default: config)")
     p.add_argument("--csv", type=Path, help="daily candles file for --provider csv")
+    p.add_argument("--no-cache", action="store_true", help="bypass the local candle cache")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add(name, fn, help):
@@ -430,6 +520,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("price", cmd_price, "print the spot price")
 
+    sp = add("sync", cmd_sync, "download daily candles into the local cache (later runs fetch only the gap)")
+    sp.add_argument("--days", type=int, default=3000)
+
+    sp = add("export", cmd_export, "write candles plus SMA 20/50/100/200, RSI, ATR, volatility and volume average to a CSV")
+    sp.add_argument("--out", type=Path, required=True)
+    sp.add_argument("--days", type=int, default=3000)
+
+    sp = add("headroom", cmd_headroom, "how much more you can add and still survive the stress move, from current equity and holdings")
+    sp.add_argument("--side", choices=["long", "short"], default="long")
+    sp.add_argument("--price", type=float, help="use this price instead of fetching spot")
+    sp.add_argument("--equity", type=float)
+
     sp = add("snapshot", cmd_snapshot, "price, trend, volatility and historical adverse-move stats")
     sp.add_argument("--days", type=int, default=1000, help="daily candles to fetch (Kraken caps at 720)")
 
@@ -443,7 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
     target = sp.add_mutually_exclusive_group()
     target.add_argument("--target-pct", type=float, help="target distance, percent of entry")
     target.add_argument("--target-r", type=float, help="target as a multiple of the stop distance")
-    sp.add_argument("--leverage", type=float, required=True)
+    sp.add_argument("--leverage", type=float, required=True,
+                    help="exchange leverage if isolated margin; notional / equity if cross margin")
     sp.add_argument("--horizon", type=int, help="time stop in days (default: config max_holding_days)")
     sp.add_argument("--risk-pct", type=float, help="risk per trade for the compounded figure (default: config)")
     sp.add_argument("--days", type=int, default=3000, help="daily candles to fetch")

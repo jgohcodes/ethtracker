@@ -57,6 +57,21 @@ def adverse_excursions(df: pd.DataFrame, side: str, horizon: int) -> np.ndarray:
     return np.array(out)
 
 
+SMA_WINDOWS = (20, 50, 100, 200)
+
+
+def frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Candles plus the full indicator time series, for export to another app."""
+    out = df.copy()
+    for n in SMA_WINDOWS:
+        out[f"sma_{n}"] = sma(df["close"], n)
+    out["rsi_14"] = rsi(df["close"], 14)
+    out["atr_14"] = atr(df, 14)
+    out["vol_30d"] = realized_vol(df["close"], 30)
+    out["volume_sma_20"] = df["volume"].rolling(20).mean()
+    return out
+
+
 @dataclass(frozen=True)
 class Snapshot:
     price: float
@@ -65,7 +80,10 @@ class Snapshot:
     ret_90d: float | None
     sma_20: float | None
     sma_50: float | None
+    sma_100: float | None
     sma_200: float | None
+    volume: float  # the latest candle, which is a partial day while the day is open
+    volume_avg_20: float | None  # None when the source has no volume
     rsi_14: float | None
     atr_14: float | None
     atr_14_pct: float | None
@@ -103,11 +121,15 @@ def snapshot(df: pd.DataFrame, price: float | None = None) -> Snapshot:
     recent = df.tail(90)
     high_90 = float(recent["high"].max())
     month = df.tail(30)
-    zscore = _last((close - sma(close, 20)) / close.rolling(20).std(ddof=0))
+    volume_avg = _last(df["volume"].rolling(20).mean())
+    zscore =_last((close - sma(close, 20)) / close.rolling(20).std(ddof=0))
     return Snapshot(
         price=last,
         ret_7d=_ret(close, 7), ret_30d=_ret(close, 30), ret_90d=_ret(close, 90),
-        sma_20=_last(sma(close, 20)), sma_50=_last(sma(close, 50)), sma_200=_last(sma(close, 200)),
+        sma_20=_last(sma(close, 20)), sma_50=_last(sma(close, 50)),
+        sma_100=_last(sma(close, 100)), sma_200=_last(sma(close, 200)),
+        volume=float(df["volume"].iloc[-1]),
+        volume_avg_20=volume_avg or None,
         rsi_14=_last(rsi(close, 14)),
         atr_14=atr_14, atr_14_pct=None if atr_14 is None else atr_14 / last,
         vol_30d=vol, daily_sigma=None if vol is None else vol / np.sqrt(DAYS_PER_YEAR),

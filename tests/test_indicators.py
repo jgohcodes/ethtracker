@@ -54,6 +54,29 @@ def test_snapshot_fields_and_price_override(candles):
     assert snap.candles == len(candles)
 
 
+def test_snapshot_has_all_four_smas_and_volume(candles):
+    snap = indicators.snapshot(candles)
+    closes = candles["close"]
+    for n in (20, 50, 100, 200):
+        assert getattr(snap, f"sma_{n}") == pytest.approx(closes.tail(n).mean())
+    assert snap.volume == 1000.0 and snap.volume_avg_20 == pytest.approx(1000.0)
+
+
+def test_snapshot_volume_average_is_none_when_the_source_has_no_volume(candles):
+    assert indicators.snapshot(candles.assign(volume=0.0)).volume_avg_20 is None
+
+
+def test_frame_adds_the_requested_metrics_without_touching_the_candles(candles):
+    out = indicators.frame(candles)
+    assert list(out.columns[:5]) == list(candles.columns)
+    for column in ("sma_20", "sma_50", "sma_100", "sma_200", "rsi_14", "atr_14", "vol_30d", "volume_sma_20"):
+        assert column in out.columns
+    assert out["sma_100"].iloc[-1] == pytest.approx(candles["close"].tail(100).mean())
+    assert out["sma_200"].iloc[:199].isna().all() and not pd.isna(out["sma_200"].iloc[199])
+    assert out["rsi_14"].iloc[-1] == pytest.approx(indicators.rsi(candles["close"]).iloc[-1])
+    assert (out["open"] == candles["open"]).all()
+
+
 def test_snapshot_pullback_gauges(candles):
     snap = indicators.snapshot(candles)
     month = candles.tail(30)

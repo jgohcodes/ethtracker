@@ -16,7 +16,9 @@ State lives in `~/.ethtracker` (override with `ETHTRACKER_HOME`): `config.toml` 
 |---|---|
 | `snapshot` | Price, returns, SMAs, RSI, ATR, realised vol, pullback gauges (distance below the 30-day high / above the 30-day low, z-score), and how far ETH historically moved *against* a long or short within your holding period |
 | `study` | Simulates a rule-based pullback strategy on daily candles, one position at a time, in R-multiples, and compares it with buy-and-hold. See [Testing a pullback rule](#testing-a-pullback-rule) |
-| `size` | Sizes a trade from its stop, tests it against your rules, prints a leverage ladder, price scenarios and history. **Exit code 1 if blocked** |
+| `sync` / `export` | `sync` downloads daily candles into a local cache (later runs fetch only the gap). `export --out eth.csv` writes candles plus SMA 20/50/100/200, RSI, ATR, volatility and volume average for another app. See [Data](#data) |
+| `headroom` | How much more you can add and still survive the stress move, from current equity and holdings. See [The stress rule](#the-stress-rule) |
+| `size` | Sizes a trade from its stop and your remaining headroom, tests it against your rules, prints price scenarios and history (plus a leverage ladder under isolated margin). **Exit code 1 if blocked** |
 | `open` / `close` | Record a position you took / closed. `open` refuses rule-breaking plans unless `--force` (which is written into the note) |
 | `risk` | Marks open positions to market: PnL, liquidation distance, stop distance, funding accrued, time held, portfolio open risk and drawdown. **Exit code 1 if any flag is raised** |
 | `watch` | Polls the price; fires once on level crossings (`--above`, `--below`) and on position flags (`STOP_HIT`, `LIQ_DANGER`, `TIME_STOP`, ...). `--once` for cron |
@@ -41,22 +43,41 @@ Size comes from the **stop and the risk budget**, not from leverage:
 qty = equity * risk% / ( |entry - stop| + fee * (entry + stop) )
 ```
 
-Leverage only sets how much margin you post and how far away liquidation sits. For an isolated linear perpetual with maintenance margin rate `m`:
+How leverage matters depends on `margin_mode` (default `cross`; confirm it on your account). Under **isolated** margin each position has its own margin and, for a linear perpetual with maintenance margin rate `m`:
 
 ```
 long  liq = entry * (1 - 1/L) / (1 - m)        short liq = entry * (1 + 1/L) / (1 + m)
 ```
 
-At 10x the liquidation is about 9.5% from entry, at 15x about 6.2% (with `m` = 0.5%). A trade is **blocked** if any of these fail (all configurable in `config.toml`):
+At 10x that is about 9.5% from entry, at 15x about 6.2% (with `m` = 0.5%). Under **cross** margin one balance backs every position, so a position's own isolated liquidation price is not what liquidates you: the whole book is, and the exchange leverage setting stops mattering (see [The stress rule](#the-stress-rule)). A trade is **blocked** if any of these fail (all configurable in `config.toml`):
 
 1. Leverage above `max_leverage` (15).
-2. Stop uses more than `max_stop_to_liq_fraction` (50%) of the distance to liquidation.
+2. Isolated margin only: stop uses more than `max_stop_to_liq_fraction` (50%) of the distance to liquidation.
 3. Stop is closer than `min_stop_atr_multiple` (2) times the 14-day ATR, i.e. inside normal daily noise. Set to 0 to disable; skipped with a warning if candles can't be fetched.
 4. Loss at stop exceeds the risk budget (`risk_per_trade_pct`, 1%), margin exceeds `max_margin_pct` (50%), or summed loss-to-stop across open positions exceeds `max_open_risk_pct` (3%).
+5. The [stress rule](#the-stress-rule).
 
-Rules 2 and 3 together are the point: a stop wide enough to survive ETH's noise needs low leverage, and the leverage ladder in `size` shows where that boundary is for your actual stop. The defaults are my starting values, not recommendations; change them deliberately.
+Under isolated margin, rules 2 and 3 together are the point: a stop wide enough to survive ETH's noise needs low leverage, and the leverage ladder in `size` shows where that boundary is for your actual stop. The defaults are my starting values, not recommendations; change them deliberately.
 
-`risk` also flags `OPEN_RISK_LIMIT`, `DRAWDOWN_LIMIT` (equity 20% below its recorded peak), `TIME_WARN` at 80% of `max_holding_days` (14) and `TIME_STOP` at 100%.
+`risk` also flags `OPEN_RISK_LIMIT`, `DRAWDOWN_LIMIT` (equity 20% below its recorded peak), `TIME_WARN` at 80% of `max_holding_days` (14) and `TIME_STOP` at 100%. `LIQ_DANGER` and `LIQUIDATED` come from each position's own liquidation price under isolated margin, and from the whole book's liquidation price under cross margin.
+
+## The stress rule
+
+`stress_drop_pct` (default 40) asks: if price moves that far against the whole book, does equity still cover maintenance margin? Under cross margin, with total equity `E`, maintenance rate `m` and a long book of notional `N`, the book survives a fall `d` only if
+
+```
+N <= E / (d + m(1 - d))        # d = 40%, m = 0.5%:  N <= 2.48 x equity
+```
+
+`headroom` and `size` solve this for how much more you can add, from current equity and your open positions marked at the current price, so each entry is sized after the pullback, not before it. `size` caps a position at the smallest of the risk-budget size, the margin limit and this headroom.
+
+Three things to understand before relying on it:
+
+1. **Surviving the margin limit is not surviving.** At exactly 2.48x equity, a 40% fall costs 99% of equity (0.4 x 2.48). The tool prints this loss on every `size` and warns above 50%. Set `max_stress_loss_pct` to cap it (50 limits notional to 1.25x equity).
+2. **It is not a standing guarantee.** Equity falls faster than notional, so a book sized to the limit is in breach after a smaller further fall. `risk` and `watch` raise `STRESS_BREACH` when that happens. With stop-based 1% sizing you will normally sit far below the limit; the rule binds when you size by deployment instead of by stop.
+3. **Cross versus isolated.** The pooled maths needs cross margin. Under isolated margin spare balance does not protect a position, so the rule instead requires each position's own liquidation to lie beyond the move: leverage <= 1 / (1 - (1-d)(1-m)), which is 2.5x at d = 40%.
+
+It ignores fees, funding, basis, tiered maintenance margin and venue liquidation fees, so real room is smaller.
 
 ## Testing a pullback rule
 
@@ -75,9 +96,23 @@ Limits you should hold it to:
 - "Undersold" and "overbought" as you judge them by eye are not testable; the drawdown trigger and target are a proxy for them. If your real rule differs (RSI, a support level, a catalyst), say so and encode it.
 - Daily bars: fills at stop and target are exact (no slippage or gap-through), entry is the day's close, and a day touching both stop and target counts as the stop.
 
+## Data
+
+Free, keyless sources:
+
+| Need | Source | Notes |
+|---|---|---|
+| Spot price | Coinbase Prices API | a single price, no highs or lows |
+| Daily open/high/low/close/volume | Coinbase Exchange public candles, ETH-USD | 300 candles per request, paged to the days you ask for |
+| SMA 20/50/100/200, RSI, ATR, volatility, volume average | computed locally (`indicators.py`) | no free API serves these dependably; computing them from candles keeps them consistent, unmetered and auditable |
+| Alternatives | Kraken OHLC (last 720 days), your own CSV | `--provider kraken` / `--provider csv --csv FILE` |
+
+`ethtracker sync` downloads once into `~/.ethtracker/candles/`. Every later command reads that cache and fetches only the gap (`--no-cache` bypasses it, and a failed refresh falls back to the cache with a warning). `ethtracker export --out eth.csv` writes the whole series with every metric for another app. Volume is in ETH, and the latest day is partial until it closes.
+
 ## Assumptions and limits
 
-- **Model**: linear USD-margined perpetual, isolated margin, one flat maintenance margin rate. Real venues use tiered rates, liquidation fees and insurance funds. Treat `liq price` as an estimate and compare it with your venue's own number before trading. Cross margin with spare collateral liquidates further away, so isolated is the conservative case.
+- **Venue**: Coinbase's help center reportedly says Coinbase International Exchange perpetuals migrated to a Deribit-powered venue on 1 October 2026, with API trading moving to a new gateway and new API keys ([Coinbase FAQ](https://help.coinbase.com/en/international-exchange/deribit/coinbase-faqs); I saw only search summaries of it and could not open the page). Do not build on the legacy International Exchange market-data endpoints. Which instrument you trade (linear USDC-margined or inverse coin-margined), its leverage cap, funding schedule and margin mode decide whether this tool's maths applies, so set `margin_mode`, `max_leverage`, `maintenance_margin_rate` and the fee from your product's terms.
+- **Model**: a linear (USD- or USDC-margined) perpetual with one flat maintenance margin rate. Inverse (coin-margined) contracts are not modelled. `margin_mode` selects pooled (cross) or per-position (isolated) liquidation. Real venues use tiered rates, liquidation fees and insurance funds, so treat every liquidation figure as an estimate and compare it with your venue's own before trading.
 - **Defaults to verify against your venue**: `maintenance_margin_rate` 0.5%, `taker_fee_rate` 0.05%/side, `funding_rate_8h` 0.01%. Funding floats with the market and can turn negative; the estimate over `max_holding_days` is a rough scale. The shipped `max_leverage = 15` is not a Coinbase-specific figure: on Coinbase, which product you trade sets the leverage cap, contract size, fee tier, funding schedule and maintenance margin, so check that product's current terms and set `config.toml` to match.
 - **Reward:risk** is net of fees and of funding over the full hold, which is conservative if the target is hit early.
 - **Prices**: spot comes from the [Coinbase Prices API](https://docs.cdp.coinbase.com/coinbase-app/track-apis/prices) (`GET api.coinbase.com/v2/prices/ETH-USD/spot`, public, no key). That endpoint returns a single price, not highs and lows, so ATR, the adverse-move history and `study` use daily candles from Coinbase Exchange's public candles endpoint instead. Kraken is an alternative provider. All of this is spot: a perpetual's mark price can differ, and liquidation uses mark.
@@ -92,7 +127,7 @@ Limits you should hold it to:
 1. **Backtester**: `study` is the first cut (same sizing, liquidation, fee and funding functions, daily bars, one position). A proper one adds intraday candles for stop/target ordering, slippage, walk-forward validation and a rule set you have committed to before looking at results. Nothing should trade live that has not survived this.
 2. **Strategy interface**: `(candles, state) -> intent`, with the risk gate between intent and order.
 3. **Paper broker**, run for weeks against live prices.
-4. **Exchange adapter**, only after 1 to 3. Use API keys with trading but no withdrawal permission, keep them outside the repo, add a daily-loss kill-switch and a hard position cap enforced on the exchange side as well.
+4. **Exchange adapter**, only after 1 to 3, written against Coinbase's current Deribit-powered gateway rather than the legacy International Exchange API (see Venue above). Use API keys with trading but no withdrawal permission, keep them outside the repo, add a daily-loss kill-switch and a hard position cap enforced on the exchange side as well.
 
 ## Development
 

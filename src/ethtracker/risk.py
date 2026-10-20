@@ -2,16 +2,17 @@
 
 Pure functions only, no I/O, so the same code can gate a bot later.
 
-Model: isolated margin, linear contract (USD PnL = qty * price move), maintenance
-margin charged on mark notional at one fixed rate. Venues differ (tiered
-maintenance rates, liquidation fees, insurance funds), so ``liq_price`` is an
-estimate. Confirm it against your venue's own liquidation price before trading.
-Cross margin with spare collateral liquidates further away, so isolated is the
-conservative choice.
+Model: linear contract (USD PnL = qty * price move), maintenance margin charged on
+notional at one fixed rate. Per-position ``liq_price`` assumes isolated margin; the
+portfolio stress test assumes cross margin (every dollar of equity backs every
+position). An inverse (coin-margined) contract is NOT modelled. Venues differ
+(tiered maintenance rates, liquidation fees, insurance funds), so every liquidation
+figure is an estimate: confirm it against your venue's own before trading.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -19,6 +20,7 @@ from .config import Config
 
 FUNDING_PERIODS_PER_DAY = 3
 FUNDING_WARN_R = 0.25  # warn when funding over the hold exceeds this multiple of the risk budget
+STRESS_LOSS_WARN = 0.5  # warn when the stress move would cost more than this share of equity
 DEFAULT_MOVES = (-0.30, -0.20, -0.10, -0.05, 0.05, 0.10, 0.20, 0.30)
 _EPS = 1e-9
 
@@ -67,6 +69,73 @@ def funding_cost(side: str, notional: float, rate_8h: float, days: float) -> flo
     return _sign(side) * notional * rate_8h * FUNDING_PERIODS_PER_DAY * days
 
 
+@dataclass(frozen=True)
+class Stress:
+    move: float  # signed fraction of price
+    equity_after: float
+    loss_pct: float  # fraction of total equity lost; negative is a gain
+    survives: bool  # equity still covers maintenance margin after the move
+
+
+def exposure(holdings: Sequence[Position], price: float) -> tuple[float, float]:
+    """(net, gross) notional of ``holdings`` at ``price``; net is long minus short."""
+    net = sum(_sign(p.side) * p.qty * price for p in holdings)
+    gross = sum(p.qty * price for p in holdings)
+    return net, gross
+
+
+def total_equity(equity: float, holdings: Sequence[Position], price: float) -> float:
+    """Wallet balance plus the open PnL of ``holdings`` marked at ``price``."""
+    return equity + sum(pnl(p.side, p.entry, price, p.qty) for p in holdings)
+
+
+def stress_at(total: float, net: float, gross: float, move: float, mmr: float) -> Stress:
+    """Cross margin: all equity backs all positions; maintenance is ``mmr`` of notional at the new price."""
+    change = net * move
+    after = total + change
+    survives = after >= mmr * gross * (1 + move) * (1 - _EPS)
+    return Stress(move, after, -change / total if total > 0 else float("inf"), survives)
+
+
+def max_additional_notional(cfg: Config, total: float, net: float, gross: float, side: str) -> float:
+    """Largest extra notional (USD) of ``side`` that keeps the portfolio inside the stress rule.
+
+    Tests a move of +/- ``stress_drop_pct``. For each move x, with n added notional:
+    equity after = total + x*(net + s*n) must cover mmr*(1+x)*(gross + n), and the loss
+    must stay within ``max_stress_loss_pct``. Both are linear in n. Infinite when the rule is off.
+    """
+    if cfg.stress_drop_pct <= 0:
+        return float("inf")
+    s = _sign(side)
+    a = cfg.stress_drop_pct / 100
+    m = cfg.maintenance_margin_rate
+    cap = cfg.max_stress_loss_pct / 100
+    limit = float("inf")
+    for x in (-a, a):
+        slack = total + x * net - m * (1 + x) * gross
+        per_dollar = s * x - m * (1 + x)
+        if per_dollar < 0:
+            limit = min(limit, slack / -per_dollar)
+        if s * x < 0:
+            limit = min(limit, (cap * total + x * net) / -(s * x))
+    return max(0.0, limit)
+
+
+def account_liquidation_price(total: float, holdings: Sequence[Position], price: float, mmr: float) -> float | None:
+    """Cross-margin liquidation price of same-direction holdings; None when empty or mixed long and short.
+
+    long:  total + q(p - P) = m*q*p  ->  p = (P - total/q) / (1 - m)
+    short: total + q(P - p) = m*q*p  ->  p = (P + total/q) / (1 + m)
+    """
+    sides = {p.side for p in holdings}
+    if len(sides) != 1:
+        return None
+    qty = sum(p.qty for p in holdings)
+    if _sign(next(iter(sides))) == 1:
+        return max(0.0, (price - total / qty) / (1 - mmr))
+    return (price + total / qty) / (1 + mmr)
+
+
 def _check_levels(side: str, entry: float, stop: float, target: float | None) -> None:
     s = _sign(side)
     if entry <= 0 or stop <= 0:
@@ -105,6 +174,10 @@ class SizePlan:
     reward_usd: float | None  # net of fees and funding
     reward_risk: float | None
     margin_capped: bool
+    stress_move: float  # signed move that hurts this side; 0 when the stress rule is off
+    stress_loss_pct: float  # portfolio loss at that move, fraction of total equity, with this trade added
+    stress_headroom_usd: float  # extra notional allowed before this trade; inf when the rule is off
+    stress_capped: bool
     violations: tuple[str, ...]
     warnings: tuple[str, ...]
 
@@ -127,11 +200,13 @@ def plan_position(
     hold_days: float | None = None,
     open_risk_usd: float = 0.0,
     atr_pct: float | None = None,
+    holdings: Sequence[Position] = (),
 ) -> SizePlan:
     """Size a trade from its stop and risk budget, then test it against the rules in ``cfg``.
 
-    With ``qty=None`` the size is derived from the risk budget (and capped by
-    ``max_margin_pct``). With ``qty`` given, that size is evaluated as-is, which
+    With ``qty=None`` the size is derived from the risk budget, capped by
+    ``max_margin_pct`` and by the stress rule given ``holdings`` (open positions,
+    marked at ``entry``). With ``qty`` given, that size is evaluated as-is, which
     is how a fill you already have is checked. ``atr_pct`` is the 14d ATR as a
     fraction of price; without it the stop-vs-noise rule is skipped with a warning.
     """
@@ -146,17 +221,37 @@ def plan_position(
     budget_pct = cfg.risk_per_trade_pct if risk_pct is None else risk_pct
     margin_cap_usd = equity * cfg.max_margin_pct / 100
 
-    margin_capped = False
+    s = _sign(side)
+    mmr = cfg.maintenance_margin_rate
+    cross = cfg.margin_mode == "cross"
+    stress_on = cfg.stress_drop_pct > 0
+    a = cfg.stress_drop_pct / 100
+    total = total_equity(equity, holdings, entry)
+    net0, gross0 = exposure(holdings, entry)
+    headroom = max_additional_notional(cfg, total, net0, gross0, side) if cross else float("inf")
+
+    margin_capped = stress_capped = False
     if qty is None:
         per_unit_loss = abs(entry - stop) + fee * (entry + stop)
-        qty = equity * budget_pct / 100 / per_unit_loss
-        qty_cap = margin_cap_usd * leverage / entry
-        if qty > qty_cap:
-            qty, margin_capped = qty_cap, True
+        qty_risk = equity * budget_pct / 100 / per_unit_loss
+        qty_margin = margin_cap_usd * leverage / entry
+        qty_stress = headroom / entry
+        qty = min(qty_risk, qty_margin, qty_stress)
+        margin_capped = qty_margin < min(qty_risk, qty_stress)
+        stress_capped = qty_stress < min(qty_risk, qty_margin)
 
     notional = qty * entry
+    stress_survives, stress_loss = True, 0.0
+    if stress_on and cross:
+        down, up = (stress_at(total, net0 + s * notional, gross0 + notional, x, mmr) for x in (-a, a))
+        stress_survives = down.survives and up.survives
+        stress_loss = (down if s == 1 else up).loss_pct
     margin = notional / leverage
     liq = liquidation_price(side, entry, leverage, cfg.maintenance_margin_rate)
+    if stress_on and not cross:
+        # isolated: spare balance does not protect the position, so its own liquidation must lie beyond the move
+        stress_survives = leverage <= max_leverage_for_distance(side, a, mmr, 1.0) * (1 + _EPS)
+        stress_loss = min(a * notional, margin) / equity
     stop_dist = abs(entry - stop) / entry
     liq_dist = abs(entry - liq) / entry
     fees_at_stop = fee * qty * (entry + stop)
@@ -186,13 +281,13 @@ def plan_position(
             )
             violations.append(
                 f"Stop is {stop_dist:.1%} from entry = {stop_atr:.1f}x the 14d ATR ({atr_pct:.1%}), "
-                f"inside normal daily noise (minimum {cfg.min_stop_atr_multiple:g}x = {min_dist:.1%}). "
-                f"A stop that wide supports at most {lev_at_min:.1f}x leverage."
+                f"inside normal daily noise (minimum {cfg.min_stop_atr_multiple:g}x = {min_dist:.1%})."
+                + ("" if cross else f" A stop that wide supports at most {lev_at_min:.1f}x leverage.")
             )
 
     if leverage > cfg.max_leverage + _EPS:
         violations.append(f"Leverage {leverage:g}x exceeds the {cfg.max_leverage:g}x cap.")
-    if stop_fraction > cfg.max_stop_to_liq_fraction + _EPS:
+    if not cross and stop_fraction > cfg.max_stop_to_liq_fraction + _EPS:
         if stop_fraction >= 1:
             lead = f"Liquidation ({liq_dist:.1%} away) triggers BEFORE your stop ({stop_dist:.1%} away)."
         else:
@@ -215,7 +310,32 @@ def plan_position(
             f"Total open risk would be {(open_risk_usd + risk_usd) / equity:.2%} of equity "
             f"(limit {cfg.max_open_risk_pct:g}%)."
         )
+    loss_cap_hit = stress_on and stress_loss * 100 > cfg.max_stress_loss_pct + _EPS
+    if stress_on and not stress_survives and cross:
+        violations.append(
+            f"A {a:.0%} move against the portfolio would breach your margin limit with this position "
+            f"(room before this trade: ${headroom:,.0f} of notional)."
+        )
+    if stress_on and not stress_survives and not cross:
+        violations.append(
+            f"Isolated margin: at {leverage:g}x this position is liquidated {liq_dist:.1%} from entry, inside a "
+            f"{a:.0%} move. Leverage that survives it: at most {max_leverage_for_distance(side, a, mmr, 1.0):.1f}x."
+        )
+    if loss_cap_hit:
+        violations.append(
+            f"A {a:.0%} adverse move would lose {stress_loss:.0%} of equity (cap {cfg.max_stress_loss_pct:g}%)."
+        )
 
+    if stress_capped:
+        warnings.append(
+            f"Size capped by the {a:.0%} stress rule; risk is {risk_usd / equity:.2%}, "
+            f"below the {budget_pct:g}% budget."
+        )
+    if stress_on and cross and stress_survives and not loss_cap_hit and stress_loss > STRESS_LOSS_WARN + _EPS:
+        warnings.append(
+            f"A {a:.0%} adverse move loses {stress_loss:.0%} of equity. Surviving the margin limit is "
+            f"not surviving financially: cap it with max_stress_loss_pct."
+        )
     if margin_capped:
         warnings.append(
             f"Size capped by the {cfg.max_margin_pct:g}% margin limit; risk is "
@@ -241,6 +361,8 @@ def plan_position(
         stop_atr_multiple=stop_atr, risk_usd=risk_usd, risk_pct=risk_usd / equity, fees_at_stop_usd=fees_at_stop,
         hold_days=hold_days, funding_usd=funding, reward_usd=reward_usd,
         reward_risk=reward_risk, margin_capped=margin_capped,
+        stress_move=-s * a, stress_loss_pct=stress_loss, stress_headroom_usd=headroom,
+        stress_capped=stress_capped,
         violations=tuple(violations), warnings=tuple(warnings),
     )
 
@@ -316,10 +438,11 @@ def mark_position(cfg: Config, pos: Position, price: float, now: datetime) -> Po
     loss_to_stop = max(0.0, s * (price - pos.stop) * pos.qty) + cfg.taker_fee_rate * pos.qty * pos.stop
 
     flags = []
-    if dist_to_liq <= 0:
-        flags.append("LIQUIDATED")
-    elif dist_to_liq * 100 < cfg.liq_warn_pct:
-        flags.append("LIQ_DANGER")
+    if cfg.margin_mode == "isolated":  # under cross margin the whole book liquidates: see portfolio_status
+        if dist_to_liq <= 0:
+            flags.append("LIQUIDATED")
+        elif dist_to_liq * 100 < cfg.liq_warn_pct:
+            flags.append("LIQ_DANGER")
     if dist_to_stop <= 0:
         flags.append("STOP_HIT")
     if days_held >= cfg.max_holding_days:
@@ -348,6 +471,10 @@ class PortfolioStatus:
     open_risk_usd: float
     open_risk_pct: float
     drawdown: float  # from recorded peak, fraction
+    stress_loss_pct: float  # worst loss at +/- stress_drop_pct, fraction of total equity
+    stress_survives: bool
+    headroom_notional: float  # extra notional the stress rule still allows; inf when the rule is off
+    account_liq_price: float | None  # cross-margin liquidation of the whole book, if one-directional
     flags: tuple[str, ...]
 
 
@@ -369,11 +496,44 @@ def portfolio_status(
     if drawdown * 100 >= cfg.max_account_drawdown_pct:
         flags.append("DRAWDOWN_LIMIT")
 
+    cross = cfg.margin_mode == "cross"
+    a = cfg.stress_drop_pct / 100
+    stress_loss, stress_survives, headroom, account_liq = 0.0, True, float("inf"), None
+    if statuses and cross and total <= 0:
+        flags.append("LIQUIDATED")  # losses have consumed the whole balance
+    if statuses and cross and total > 0:
+        price = statuses[0].price
+        account_liq = account_liquidation_price(
+            total, [s.position for s in statuses], price, cfg.maintenance_margin_rate
+        )
+        if account_liq is not None:
+            dist = _sign(statuses[0].position.side) * (price - account_liq) / price
+            if dist <= 0:
+                flags.append("LIQUIDATED")
+            elif dist * 100 < cfg.liq_warn_pct:
+                flags.append("LIQ_DANGER")
+    if statuses and cfg.stress_drop_pct > 0:
+        if total <= 0:
+            stress_survives = False
+        elif cross:
+            results = [stress_at(total, net, gross, x, cfg.maintenance_margin_rate) for x in (-a, a)]
+            stress_survives = all(r.survives for r in results)
+            stress_loss = max(r.loss_pct for r in results)
+            headroom = max_additional_notional(cfg, total, net, gross, "long" if net >= 0 else "short")
+        else:  # isolated: each position must keep its own liquidation beyond the move
+            stress_survives = all(st.dist_to_liq >= a - _EPS for st in statuses)
+            stress_loss = sum(min(a * st.position.qty * st.price, st.position.margin) for st in statuses) / total
+        if not stress_survives:
+            flags.append("STRESS_BREACH")
+        elif stress_loss * 100 > cfg.max_stress_loss_pct + _EPS:
+            flags.append("STRESS_LOSS_LIMIT")
+
     return PortfolioStatus(
         equity=equity, unrealized=unrealized, total_equity=total, margin_used=margin,
         margin_utilisation=margin / total if total > 0 else float("inf"),
         gross_notional=gross, net_notional=net,
         effective_leverage=gross / total if total > 0 else float("inf"),
         open_risk_usd=open_risk, open_risk_pct=open_risk / total if total > 0 else float("inf"),
-        drawdown=drawdown, flags=tuple(flags),
+        drawdown=drawdown, stress_loss_pct=stress_loss, stress_survives=stress_survives,
+        headroom_notional=headroom, account_liq_price=account_liq, flags=tuple(flags),
     )

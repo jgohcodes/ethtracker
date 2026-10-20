@@ -25,6 +25,8 @@ class Config:
     max_stop_to_liq_fraction: float = 0.5
     min_stop_atr_multiple: float = 2.0
     max_margin_pct: float = 50.0
+    stress_drop_pct: float = 40.0
+    max_stress_loss_pct: float = 100.0
     min_reward_risk: float = 2.0
     max_holding_days: int = 14
     max_account_drawdown_pct: float = 20.0
@@ -32,16 +34,24 @@ class Config:
     maintenance_margin_rate: float = 0.005
     taker_fee_rate: float = 0.0005
     funding_rate_8h: float = 0.0001
+    margin_mode: str = "cross"
     provider: str = "coinbase"
+
+    def __post_init__(self):
+        if self.margin_mode not in ("cross", "isolated"):
+            raise ValueError(f"margin_mode must be 'cross' or 'isolated', got {self.margin_mode!r}")
 
 
 COMMENTS = {
+    "margin_mode": "cross: one balance backs every position; isolated: each position has its own margin. Confirm on your account",
     "risk_per_trade_pct": "Max loss if the stop is hit, % of equity (fees included)",
     "max_open_risk_pct": "Cap on summed loss-to-stop across all open positions, % of equity",
     "max_leverage": "Hard cap on the exchange leverage setting",
-    "max_stop_to_liq_fraction": "Stop must sit within this fraction of the distance to liquidation",
+    "max_stop_to_liq_fraction": "Isolated margin only: stop must sit within this fraction of the distance to liquidation",
     "min_stop_atr_multiple": "Stop must be at least this many 14d ATRs from entry (0 disables): tighter sits inside daily noise",
     "max_margin_pct": "Max margin posted to a single position, % of equity",
+    "stress_drop_pct": "The book must survive a move this big against it: whole book if cross, each position's leverage if isolated (0 disables)",
+    "max_stress_loss_pct": "Also cap the equity lost at that move, % of equity; 100 = only the margin-limit test",
     "min_reward_risk": "Minimum net reward:risk (after fees and funding) when a target is given",
     "max_holding_days": "Time stop and funding/history horizon: how long you hold a swing, in days",
     "max_account_drawdown_pct": "Flag when equity is this far below its recorded peak",
