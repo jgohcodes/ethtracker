@@ -47,7 +47,7 @@ class Config:
     deep_itm_pct: float = 10.0
     exit_risk_flags: int = 2
     trail_atr_multiple: float = 3.0
-    derivs_instrument: str = "ETH-PERPETUAL"
+    derivs_instrument: str = "ETH_USDC-PERPETUAL"
     provider: str = "coinbase"
 
     def __post_init__(self):
@@ -69,7 +69,7 @@ COMMENTS = {
     "deep_itm_pct": "A position this far (%) in profit from entry is 'deep in the money' and gets profit-protection rules",
     "exit_risk_flags": "Deep in the money plus this many risk flags recommends EXIT",
     "trail_atr_multiple": "Suggested trailing stop sits this many ATRs from the best price since entry",
-    "derivs_instrument": "Deribit instrument whose open interest and funding the recorder polls",
+    "derivs_instrument": "Deribit instrument whose open interest and funding the recorder polls (the linear USDC perpetual)",
     "risk_per_trade_pct": "Max loss if the stop is hit, % of equity (fees included)",
     "max_open_risk_pct": "Cap on summed loss-to-stop across all open positions, % of equity",
     "max_leverage": "Hard cap on the exchange leverage setting",

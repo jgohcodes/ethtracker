@@ -334,15 +334,17 @@ def cmd_signals_study(args, ctx: Ctx) -> int:
     print(f"Technical risk flags (stretched, RSI hot, volatility spike) versus what followed a long entered at that day's close")
     print(f"Data: {len(df)} daily candles, {df.index[0]:%Y-%m-%d} to {df.index[-1]:%Y-%m-%d} ({provider.name}); horizon {horizon}d")
     print("-" * 78)
-    print(f"  {'bucket':<10} {'n':>5} {'median return':>14} {'>=15% drawdown':>15} {'>=20% drawdown':>15} {'>=+10% rally':>13}")
+    print(f"  {'bucket':<10} {'days':>5} {'episodes':>9} {'median return':>14} {'>=15% drawdown':>15} {'>=20% drawdown':>15} {'>=+10% rally':>13}")
     for b in buckets:
-        print(f"  {b.label:<10} {b.n:>5} {b.median_return:>+14.1%} {b.drawdown_15:>15.0%} {b.drawdown_20:>15.0%} {b.rally_10:>13.0%}")
+        episodes = "" if b.label == "all days" else b.episodes
+        print(f"  {b.label:<10} {b.n:>5} {episodes:>9} {b.median_return:>+14.1%} {b.drawdown_15:>15.0%} {b.drawdown_20:>15.0%} {b.rally_10:>13.0%}")
     base = next((b for b in buckets if b.label == "all days"), None)
     flagged = next((b for b in buckets if b.label == "2+ flags"), None)
     print()
     if base and flagged and base.drawdown_20 > 0:
         print(f"2+ flags: a >=20% drawdown followed {flagged.drawdown_20:.0%} of the time versus {base.drawdown_20:.0%} for all days "
-              f"({flagged.drawdown_20 / base.drawdown_20:.1f}x), on {flagged.n} days. The rally column is the upside an early exit would have given up.")
+              f"({flagged.drawdown_20 / base.drawdown_20:.1f}x), on {flagged.n} days in {flagged.episodes} separate episode(s). "
+              f"The rally column is the upside an early exit would have given up.")
     elif base:
         print("No qualifying 2+ flag days in this history.")
     print("Windows overlap and flagged days cluster, so n overstates the independent evidence. Judge a lift by n, not just its size.")

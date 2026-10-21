@@ -327,10 +327,17 @@ def compute(cfg: Config, df: pd.DataFrame, derivs: pd.DataFrame | None = None, a
     return SignalSet(price=float(df["close"].iloc[-1]), signals=tuple(signals), levels=levels, notes=tuple(notes))
 
 
+def count_episodes(mask: pd.Series) -> int:
+    """Separate runs of consecutive True days: a 3-day flagged stretch is one episode, not three."""
+    mask = mask.astype(bool)
+    return int((mask & ~mask.shift(fill_value=False)).sum())
+
+
 @dataclass(frozen=True)
 class Bucket:
     label: str
     n: int
+    episodes: int
     median_return: float
     drawdown_15: float  # share of entries that saw a >= 15% adverse move within the horizon
     drawdown_20: float
@@ -359,10 +366,11 @@ def warning_study(cfg: Config, df: pd.DataFrame, horizon: int = 14) -> list[Buck
     warmed_up = pd.Series(np.arange(len(outcomes)) >= STUDY_WARMUP, index=outcomes.index)
 
     def bucket(label: str, mask) -> Bucket | None:
-        sub = outcomes[mask & warmed_up]
+        selected = mask & warmed_up
+        sub = outcomes[selected]
         if sub.empty:
             return None
-        return Bucket(label, len(sub), float(sub["fwd_return"].median()), float((sub["drawdown"] >= 0.15).mean()),
+        return Bucket(label, len(sub), count_episodes(selected), float(sub["fwd_return"].median()), float((sub["drawdown"] >= 0.15).mean()),
                       float((sub["drawdown"] >= 0.20).mean()), float((sub["fwd_return"] >= 0.10).mean()))
 
     buckets = [bucket("all days", pd.Series(True, index=outcomes.index))]

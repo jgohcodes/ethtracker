@@ -241,6 +241,19 @@ def test_warning_study_buckets_partition_the_warmed_up_days():
     assert all(0 <= b.drawdown_20 <= b.drawdown_15 <= 1 for b in buckets.values())
 
 
+def test_count_episodes_counts_runs_not_days():
+    flags = pd.Series([False, True, True, True, False, True, False, False, True, True])
+    assert signals.count_episodes(flags) == 3
+    assert signals.count_episodes(pd.Series([True, True, True])) == 1  # a run that starts on the first day
+    assert signals.count_episodes(pd.Series([False, False])) == 0
+
+
+def test_study_buckets_report_fewer_episodes_than_days_for_clustered_flags():
+    buckets = {b.label: b for b in signals.warning_study(CFG, synthetic_candles(500), 14)}
+    assert all(1 <= b.episodes <= b.n for b in buckets.values())
+    assert any(b.episodes < b.n for label, b in buckets.items() if label != "all days")  # flagged days cluster
+
+
 def test_flagged_days_are_a_small_share_of_the_sample():
     """Why n is printed beside every figure: the flagged buckets are small, so their rates are noisy."""
     df = synthetic_candles(500)

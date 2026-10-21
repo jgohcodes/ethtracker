@@ -6,6 +6,8 @@ import pytest
 from ethtracker import config, data, derivs, indicators
 from ethtracker.cli import main
 
+INSTRUMENT = config.Config().derivs_instrument  # the linear USDC perpetual
+
 
 def run(capsys, *argv) -> tuple[int, str]:
     code = main([str(a) for a in argv])
@@ -239,15 +241,15 @@ def test_record_appends_a_snapshot_and_skips_a_repeat(capsys, funded, monkeypatc
     row = derivs.parse_deribit_ticker({"result": {"open_interest": 1000.0, "funding_8h": 0.0002, "timestamp": 1760961600000}})
     monkeypatch.setattr(derivs, "fetch_deribit_snapshot", lambda instrument: row)
     code, out = run(capsys, "record", "--once")
-    assert code == 0 and "ETH-PERPETUAL" in out and "OI 1,000" in out and "0.0200%" in out
-    path = derivs.recorded_path(config.home() / "derivs", "ETH-PERPETUAL")
+    assert code == 0 and INSTRUMENT in out and "OI 1,000" in out and "0.0200%" in out
+    path = derivs.recorded_path(config.home() / "derivs", INSTRUMENT)
     assert len(path.read_text().splitlines()) == 2
     code, out = run(capsys, "record", "--once")
     assert "duplicate timestamp" in out and len(path.read_text().splitlines()) == 2
 
 
 def test_recorded_history_feeds_the_signals_automatically(capsys, funded, candles_csv):
-    path = derivs.recorded_path(config.home() / "derivs", "ETH-PERPETUAL")
+    path = derivs.recorded_path(config.home() / "derivs", INSTRUMENT)
     derivs.append_snapshot(path, derivs.parse_deribit_ticker({"result": {"open_interest": 1000.0, "funding_8h": 0.0008, "timestamp": 1760961600000}}))
     code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "signals")
     assert "Funding 0.080% per 8h" in out and "longs paying heavily" in out
@@ -256,7 +258,7 @@ def test_recorded_history_feeds_the_signals_automatically(capsys, funded, candle
 def test_signals_study_prints_buckets_and_the_caveats(capsys, candles_csv):
     code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "signals-study", "--days", 500)
     assert code == 0
-    for text in ("all days", "2+ flags", "horizon 14d", "Windows overlap", "not tested here"):
+    for text in ("all days", "2+ flags", "episodes", "horizon 14d", "Windows overlap", "not tested here"):
         assert text in out
 
 
@@ -320,7 +322,7 @@ def test_watch_record_appends_a_derivatives_snapshot_each_poll(capsys, monkeypat
     rows = iter(derivs.parse_deribit_ticker({"result": {"open_interest": 1000.0 + i, "funding_8h": 0.0001, "timestamp": 1760961600000 + i * 3600000}}) for i in range(5))
     monkeypatch.setattr(derivs, "fetch_deribit_snapshot", lambda instrument: next(rows))
     watch_polls(monkeypatch, capsys, candles, [291.0, 292.0], "--record")
-    path = derivs.recorded_path(config.home() / "derivs", "ETH-PERPETUAL")
+    path = derivs.recorded_path(config.home() / "derivs", INSTRUMENT)
     assert len(path.read_text().splitlines()) == 3  # header plus one row per poll
 
 

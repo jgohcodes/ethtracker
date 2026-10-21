@@ -9,7 +9,7 @@ from ethtracker import data, derivs
 TICKER = {
     "jsonrpc": "2.0",
     "result": {
-        "instrument_name": "ETH-PERPETUAL",
+        "instrument_name": "ETH_USDC-PERPETUAL",
         "open_interest": 123456789.0,
         "funding_8h": 0.0001,
         "current_funding": 0.00012,
@@ -52,12 +52,12 @@ def test_fetch_asks_the_public_ticker_for_the_instrument(monkeypatch):
         return TICKER
 
     monkeypatch.setattr(derivs, "_get_json", fake)
-    assert derivs.fetch_deribit_snapshot("ETH-PERPETUAL")["funding_8h"] == 0.0001
-    assert seen == {"url": "https://www.deribit.com/api/v2/public/ticker", "params": {"instrument_name": "ETH-PERPETUAL"}}
+    assert derivs.fetch_deribit_snapshot("ETH_USDC-PERPETUAL")["funding_8h"] == 0.0001
+    assert seen == {"url": "https://www.deribit.com/api/v2/public/ticker", "params": {"instrument_name": "ETH_USDC-PERPETUAL"}}
 
 
 def test_snapshots_append_skip_duplicates_and_load_back(tmp_path):
-    path = derivs.recorded_path(tmp_path / "derivs", "ETH-PERPETUAL")
+    path = derivs.recorded_path(tmp_path / "derivs", "ETH_USDC-PERPETUAL")
     first = derivs.parse_deribit_ticker(TICKER)
     assert derivs.append_snapshot(path, first) is True
     assert derivs.append_snapshot(path, first) is False  # same timestamp
