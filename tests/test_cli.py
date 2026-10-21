@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import pytest
 
-from ethtracker import config, data, derivs, indicators
+from ethtracker import config, data, derivs, indicators, snapshot
 from ethtracker.cli import main
 
 INSTRUMENT = config.Config().derivs_instrument  # the linear USDC perpetual
@@ -166,6 +166,15 @@ def test_watch_alerts_on_whole_book_flags_once(capsys, funded, candles_csv):
     run(capsys, "open", "--side", "long", "--entry", 3000, "--stop", 2995, "--leverage", 5, "--qty", 8.27, "--no-history")
     code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "watch", "--once")
     assert "ALERT portfolio STRESS_BREACH" in out and "ALERT portfolio LIQUIDATED" in out
+
+
+def test_a_book_smaller_than_equity_says_it_cannot_be_liquidated_not_zero_dollars(capsys, funded):
+    run(capsys, "open", "--side", "long", "--entry", 3000, "--stop", 2910, "--leverage", 10, "--no-history")  # ~0.3x equity
+    code, out = run(capsys, "risk", "--price", 3000)
+    line = next(l for l in out.splitlines() if l.startswith("Whole-book liquidation"))
+    assert line.startswith("Whole-book liquidation: none") and "$" not in line
+    code, out = run(capsys, "headroom", "--price", 3000)
+    assert any(l.startswith("Whole-book liquidation: none") for l in out.splitlines())
 
 
 def test_headroom_is_an_error_when_the_rule_is_off(capsys, funded):
@@ -333,6 +342,93 @@ def test_watch_survives_a_failed_derivatives_record(capsys, monkeypatch, funded,
     monkeypatch.setattr(derivs, "fetch_deribit_snapshot", boom)
     code, out = watch_polls(monkeypatch, capsys, candles, [291.0], "--record")
     assert code == 0 and "ETHUSD" in out
+
+
+def test_dashboard_json_writes_strict_json_for_the_book(capsys, funded, candles_csv, tmp_path):
+    open_long(capsys, 285)
+    path = tmp_path / "out" / "dash.json"
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "dashboard-json", "--out", path)
+    assert code == 0 and "1 position(s)" in out
+    snap = json.loads(path.read_text())
+    assert snap["positions"][0]["action"] in ("HOLD", "TIGHTEN", "TAKE_PARTIAL", "EXIT")
+    assert snap["signals"] and snap["equity"]["wallet"] == 10_000
+
+
+def test_dashboard_json_prints_to_stdout_without_an_out_path(capsys, funded, candles_csv):
+    code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "dashboard-json")
+    assert code == 0 and json.loads(out)["positions"] == []
+
+
+class PostRecorder:
+    def __init__(self, fail_after=None):
+        self.calls, self.fail_after = [], fail_after
+
+    def __call__(self, url, json=None, headers=None, timeout=None):
+        if self.fail_after is not None and len(self.calls) >= self.fail_after:
+            import requests
+            raise requests.ConnectionError("down")
+        self.calls.append({"url": url, "body": json, "headers": headers})
+
+        class Ok:
+            ok, status_code, text = True, 200, "ok"
+
+        return Ok()
+
+
+def test_publish_once_posts_the_snapshot_and_never_echoes_the_token(capsys, monkeypatch, funded, candles_csv):
+    open_long(capsys, 285)
+    monkeypatch.setenv("ETHTRACKER_INGEST_TOKEN", "s3cret-ingest-token")
+    post = PostRecorder()
+    monkeypatch.setattr(snapshot.requests, "post", post)
+    code = main(["--provider", "csv", "--csv", str(candles_csv), "publish", "--url", "http://localhost:3000", "--once"])
+    captured = capsys.readouterr()
+    assert code == 0 and "published ETHUSD" in captured.out and "#1 " in captured.out
+    assert "s3cret-ingest-token" not in captured.out + captured.err
+    (call,) = post.calls
+    assert call["url"] == "http://localhost:3000/api/ingest"
+    assert call["headers"] == {"Authorization": "Bearer s3cret-ingest-token"}
+    assert call["body"]["positions"][0]["id"] == 1
+
+
+def test_publish_reads_the_url_from_the_environment(capsys, monkeypatch, funded, candles_csv):
+    monkeypatch.setenv("ETHTRACKER_INGEST_TOKEN", "t")
+    monkeypatch.setenv("ETHTRACKER_DASHBOARD_URL", "https://dash.example.app")
+    post = PostRecorder()
+    monkeypatch.setattr(snapshot.requests, "post", post)
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "publish", "--once"]) == 0
+    assert post.calls[0]["url"] == "https://dash.example.app/api/ingest"
+
+
+def test_publish_needs_a_url_and_a_token_and_refuses_plain_http(capsys, monkeypatch, funded, candles_csv):
+    base = ["--provider", "csv", "--csv", str(candles_csv), "publish", "--once"]
+    monkeypatch.delenv("ETHTRACKER_INGEST_TOKEN", raising=False)
+    monkeypatch.delenv("ETHTRACKER_DASHBOARD_URL", raising=False)
+    assert main(base) == 2 and "ETHTRACKER_DASHBOARD_URL" in capsys.readouterr().err
+    assert main([*base, "--url", "https://d.example"]) == 2 and "ETHTRACKER_INGEST_TOKEN" in capsys.readouterr().err
+    monkeypatch.setenv("ETHTRACKER_INGEST_TOKEN", "t")
+    assert main([*base, "--url", "http://d.example"]) == 2 and "refusing to send a token" in capsys.readouterr().err
+
+
+def test_publish_first_failure_is_fatal_but_later_ones_are_warnings(capsys, monkeypatch, funded, candles_csv):
+    monkeypatch.setenv("ETHTRACKER_INGEST_TOKEN", "t")
+    base = ["--provider", "csv", "--csv", str(candles_csv), "publish", "--url", "https://d.example", "--interval", "1"]
+    monkeypatch.setattr(snapshot.requests, "post", PostRecorder(fail_after=0))
+    assert main([*base, "--once"]) == 2
+    assert "could not reach" in capsys.readouterr().err
+
+    post = PostRecorder(fail_after=1)  # the first publish works, the second cannot reach the dashboard
+    monkeypatch.setattr(snapshot.requests, "post", post)
+    sleeps = []
+
+    def sleeper(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleeper)
+    assert main(base) == 0
+    captured = capsys.readouterr()
+    assert captured.out.count("published ETHUSD") == 1 and "not published this round" in captured.err
 
 
 def test_study_from_csv_prints_trades_summary_and_caveats(capsys, candles_csv):

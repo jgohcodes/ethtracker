@@ -25,6 +25,7 @@ State lives in `~/.ethtracker` (override with `ETHTRACKER_HOME`): `config.toml` 
 | `advise` | Per open position: a recommended action (HOLD, TIGHTEN, TAKE_PARTIAL, EXIT), the bull case, the bear case and why the rule fired. **Exit code 1 on EXIT or TAKE_PARTIAL** |
 | `record` | Polls Deribit's public ticker and appends open interest and funding to a local history, which is what makes the open-interest signals possible |
 | `signals-study` | Tests the candle-derived risk flags against history: what followed days with 0, 1, 2+ flags |
+| `publish` / `dashboard-json` | `publish` computes the dashboard snapshot and sends it to your Vercel dashboard (token from `ETHTRACKER_INGEST_TOKEN`, URL from `--url` or `ETHTRACKER_DASHBOARD_URL`); `dashboard-json` prints what it would send. See [Dashboard](#dashboard) |
 | `watch` | Polls the price; fires once on level crossings (`--above`, `--below`) and on position and whole-book flags. With open positions it recomputes each recommended action every poll and announces only when one changes. `--record` also logs derivatives data; `--once` for cron |
 | `equity`, `history` | Show/set equity; closed trades with R-multiples |
 
@@ -121,6 +122,45 @@ What to trust:
   ```
 - **Expect false exits.** A warning is at best a shift in odds, and each false exit costs upside.
 - **Derivatives data is a snapshot, not a history.** Deribit's public ticker gives the current open interest and funding, so `record` builds the history: funding works immediately, the 24h open-interest change needs 24 hours of recording, and the percentile needs 30 days. There is no complete free liquidation feed (Binance's stream pushes at most one liquidation per symbol per second), so liquidation signals appear only if you pass `--derivs-csv` with `long_liq_usd` / `short_liq_usd` columns from a data vendor. `--derivs-csv` also accepts `open_interest`, `funding_8h` and the other columns from any source, with `time` or `date` as the first column.
+
+## Dashboard
+
+A read-only page with your positions (each with its action, bull case and bear case), account and stress tiles, the signals, a price ladder and an embedded TradingView chart. Your machine computes everything and publishes a JSON snapshot; the Vercel app only stores and displays it, so it needs no data libraries and never holds an exchange key.
+
+```
+your machine                                    Vercel (web/)
+ethtracker publish ──POST /api/ingest────────►  api/ingest.js ──► Upstash Redis
+ (computes signals, advice, stress)  INGEST_TOKEN                      │
+browser ◄─GET /api/snapshot  DASHBOARD_TOKEN──  api/snapshot.js ◄──────┘
+        ◄─ public/ (static page + TradingView widget)
+```
+
+**Deploy**
+
+1. In Vercel, import this repository and set the project's **Root Directory** to `web`. The framework preset is "Other"; `web/vercel.json` sets the output directory to `public`.
+2. Add storage: Marketplace, **Upstash Redis**, connected to the project. Check Settings, Environment Variables afterwards: the integration sets either `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` or the older `KV_REST_API_URL` / `KV_REST_API_TOKEN`, and the API accepts either pair. Check Upstash's current free-plan limits.
+3. Add two environment variables with different random values (`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`): `DASHBOARD_TOKEN`, which the browser uses to read, and `INGEST_TOKEN`, which only your machine uses to write. Deploy.
+4. On your machine:
+
+   ```
+   export ETHTRACKER_DASHBOARD_URL=https://your-app.vercel.app
+   export ETHTRACKER_INGEST_TOKEN=<the INGEST_TOKEN>
+   ethtracker publish --record        # every 60s; --once for a single push (cron)
+   ```
+5. Open the site and paste the `DASHBOARD_TOKEN`. It is kept in that browser's local storage; "Sign out" clears it.
+
+**How it behaves.** The page refetches every 30 seconds. A snapshot older than 3 minutes shows a "Delayed" banner and older than 10 minutes a "Stale" banner, judged on the server's receive time, which a client cannot forge. If `publish` stops, the page says so instead of showing a calm HOLD. Snapshots expire after a week.
+
+**Security.**
+
+- The page itself is public; all data sits behind the token. On Vercel's Hobby plan the production domain stays public (Vercel Authentication covers only previews there), so the token is what protects you. Treat `DASHBOARD_TOKEN` like a password; rotate by changing the variable and redeploying.
+- The snapshot contains your equity and positions and lives in your Upstash database. It never contains exchange keys, and the read token cannot overwrite it.
+- `publish` refuses plain `http://` URLs (except localhost) because the token travels in a header, and reads its token from the environment only.
+- Everything shown is inserted as text, never markup. No Content-Security-Policy is set: a correct one needs testing in a browser against TradingView's domains.
+
+**The chart** is TradingView's free embedded widget, defaulting to `COINBASE:ETHUSD` (the same spot data the signals use). Use `?symbol=EXCHANGE:SYMBOL` to change it; confirm the exact symbol of your perpetual on TradingView. The widget cannot draw your entries, stops or the computed levels, so the price ladder lists them in price order beside the mark.
+
+**Tested and not tested.** The API handlers are tested against a local HTTP server with an in-memory Redis (`cd web && npm install && npm test`), the snapshot builder and `publish` in the Python suite, and the page in headless Chromium against a local stand-in, end to end from the real `ethtracker publish`. It has not been deployed to Vercel, run against a real Upstash database, or loaded with the live TradingView widget (the build environment blocks outside hosts).
 
 ## Testing a pullback rule
 

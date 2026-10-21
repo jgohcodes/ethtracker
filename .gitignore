@@ -5,3 +5,5 @@ __pycache__/
 build/
 dist/
 .ethtracker/
+web/node_modules/
+.vercel/

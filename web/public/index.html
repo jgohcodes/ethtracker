@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>ETH Tracker</title>
+  <script>
+    // Apply a saved theme before first paint so there is no flash. Storage can be unavailable: fail quiet.
+    try {
+      var saved = localStorage.getItem("ethtracker.theme");
+      if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
+    } catch (e) {}
+  </script>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="bar__title">
+      <h1>ETH Tracker</h1>
+      <span id="price" class="bar__price" aria-live="off"></span>
+    </div>
+    <div class="bar__meta">
+      <span id="freshness" class="badge" data-tone="muted" hidden></span>
+      <button id="theme" class="btn" type="button" aria-label="Switch colour theme">Theme</button>
+      <button id="signout" class="btn" type="button" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" role="status" hidden></div>
+
+  <section id="login" class="card login" hidden>
+    <h2>Enter your dashboard token</h2>
+    <p class="muted">The read-only token set as <code>DASHBOARD_TOKEN</code> on this deployment. It stays in this browser only.</p>
+    <form id="login-form" autocomplete="off">
+      <label for="token">Token</label>
+      <input id="token" name="token" type="password" required spellcheck="false" autocapitalize="off">
+      <button class="btn btn--primary" type="submit">Open dashboard</button>
+    </form>
+    <p id="login-error" class="login__error" role="alert" hidden></p>
+  </section>
+
+  <main id="app" hidden>
+    <section aria-labelledby="h-account"><h2 id="h-account" class="sr">Account</h2><div id="kpis" class="kpis"></div></section>
+    <section aria-labelledby="h-positions"><h2 id="h-positions">Positions</h2><div id="positions" class="stack"></div></section>
+    <div class="split">
+      <section aria-labelledby="h-chart" class="card chartcard">
+        <h2 id="h-chart">Chart</h2>
+        <div id="chart" class="chart"></div>
+      </section>
+      <section aria-labelledby="h-signals" class="card">
+        <h2 id="h-signals">Signals</h2>
+        <div id="signals"></div>
+      </section>
+    </div>
+    <section aria-labelledby="h-ladder" class="card"><h2 id="h-ladder">Price ladder</h2><div id="ladder"></div></section>
+    <section aria-labelledby="h-closed" class="card"><h2 id="h-closed">Recent closed trades</h2><div id="closed"></div></section>
+    <footer class="foot" id="foot"></footer>
+  </main>
+
+  <script type="module" src="dashboard.js"></script>
+</body>
+</html>

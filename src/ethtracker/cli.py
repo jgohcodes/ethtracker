@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -12,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, config, derivs, indicators, risk, signals, study
+from . import advice, alerts, config, derivs, indicators, risk, signals, snapshot, study
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -326,6 +328,71 @@ def cmd_record(args, ctx: Ctx) -> int:
         return 0
 
 
+def _record_derivs(ctx: Ctx) -> None:
+    """Append one Deribit open-interest/funding snapshot; a failure is a warning, never fatal."""
+    try:
+        derivs.append_snapshot(
+            derivs.recorded_path(ctx.home / "derivs", ctx.cfg.derivs_instrument),
+            derivs.fetch_deribit_snapshot(ctx.cfg.derivs_instrument),
+        )
+    except DataError as exc:
+        print(f"warning: could not record derivatives data ({exc})", file=sys.stderr)
+
+
+def _snapshot(args, ctx: Ctx, provider: Provider, price: float, df: pd.DataFrame) -> dict:
+    anchor = pd.Timestamp(args.anchor, tz="UTC") if getattr(args, "anchor", None) else None
+    return snapshot.build(ctx.cfg, ctx.journal, df, price, _derivs(args, ctx), anchor=anchor, source=provider.name)
+
+
+def cmd_dashboard_json(args, ctx: Ctx) -> int:
+    provider = _provider(args, ctx)
+    price = args.price if args.price is not None else provider.spot()
+    snap = _snapshot(args, ctx, provider, price, provider.candles(args.days))
+    text = json.dumps(snap, indent=2, allow_nan=False)  # strict JSON: a stray NaN is an error, not a broken page
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(text + "\n")
+        print(f"wrote {args.out} ({len(snap['positions'])} position(s), {len(snap['signals'])} signal(s))")
+    else:
+        print(text)
+    return 0
+
+
+def cmd_publish(args, ctx: Ctx) -> int:
+    base = args.url or os.environ.get("ETHTRACKER_DASHBOARD_URL")
+    token = os.environ.get("ETHTRACKER_INGEST_TOKEN")
+    if not base:
+        raise CliError("give --url, or set ETHTRACKER_DASHBOARD_URL to your dashboard's address")
+    if not token:
+        raise CliError("set ETHTRACKER_INGEST_TOKEN to the dashboard's INGEST_TOKEN (it is read from the environment only)")
+    endpoint = snapshot.ingest_endpoint(base)
+    provider = _provider(args, ctx)
+    df, candles_at, first = None, float("-inf"), True
+    try:
+        while True:
+            try:
+                price = provider.spot()
+                if df is None or time.monotonic() - candles_at > CANDLE_REFRESH_SECONDS:
+                    df, candles_at = provider.candles(args.days), time.monotonic()
+                if args.record:
+                    _record_derivs(ctx)
+                snap = _snapshot(args, ctx, provider, price, df)
+                snapshot.publish(endpoint, token, snap)
+                actions = ", ".join(f"#{p['id']} {p['action']}" for p in snap["positions"]) or "no open positions"
+                print(f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}Z  published ETHUSD {usd(price)}  ({actions})")
+            except DataError as exc:
+                if first:
+                    raise
+                print(f"warning: not published this round ({exc})", file=sys.stderr)
+            first = False
+            if args.once:
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
 def cmd_signals_study(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
     df = provider.candles(args.days)
@@ -403,7 +470,9 @@ def cmd_headroom(args, ctx: Ctx) -> int:
     full = risk.stress_at(total, net + s * room, gross + room, -s * a, m)
     print(f"  using all of it, a {a:.0%} {'fall' if s == 1 else 'rise'} leaves {usd(full.equity_after, 0)}: {pct(full.loss_pct, 0)} of equity lost")
     liq = risk.account_liquidation_price(total, holdings, price, m)
-    if liq is not None:
+    if liq is not None and liq <= 0:
+        print("Whole-book liquidation: none. Equity exceeds exposure, so the book cannot be liquidated at this size.")
+    elif liq is not None:
         print(f"Whole-book liquidation today (cross margin): {usd(liq)} ({pct(abs(1 - liq / price))} from here)")
     print("Fees, funding, basis and venue liquidation fees are not included, so real room is smaller.")
     return 0
@@ -488,14 +557,8 @@ def cmd_watch(args, ctx: Ctx) -> int:
                     print(f"  ALERT price crossed below {usd(level)}" if price <= level else f"  ALERT price crossed above {usd(level)}")
                     fired = True
             if args.record:
-                try:
-                    derivs.append_snapshot(
-                        derivs.recorded_path(ctx.home / "derivs", ctx.cfg.derivs_instrument),
-                        derivs.fetch_deribit_snapshot(ctx.cfg.derivs_instrument),
-                    )
-                except DataError as exc:
-                    print(f"warning: could not record derivatives data ({exc})", file=sys.stderr)
-            statuses = [risk.mark_position(ctx.cfg, p, price, now) for p in ctx.journal.open_positions()]
+                _record_derivs(ctx)
+            statuses =[risk.mark_position(ctx.cfg, p, price, now) for p in ctx.journal.open_positions()]
             results = []
             if statuses:
                 if df is None or time.monotonic() - candles_at > CANDLE_REFRESH_SECONDS:
@@ -657,7 +720,9 @@ def cmd_risk(args, ctx: Ctx) -> int:
         verdict = "holds" if port.stress_survives else "BREACHED"
         room = f"; room to add {usd(port.headroom_notional, 0)} notional" if ctx.cfg.margin_mode == "cross" else ""
         print(f"Stress {ctx.cfg.stress_drop_pct:g}%: worst case loses {pct(port.stress_loss_pct, 0)} of equity, margin limit {verdict}{room}")
-        if port.account_liq_price is not None:
+        if port.account_liq_price is not None and port.account_liq_price <= 0:
+            print("Whole-book liquidation: none. Equity exceeds exposure, so the book cannot be liquidated at this size.")
+        elif port.account_liq_price is not None:
             print(f"Whole-book liquidation (cross margin): {usd(port.account_liq_price)} ({pct(abs(1 - port.account_liq_price / price))} from here)")
     flags = list(port.flags) + [f"#{s.position.id} {f}" for s in statuses for f in s.flags]
     if flags:
@@ -746,6 +811,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--instrument", help="default: config derivs_instrument")
     sp.add_argument("--interval", type=float, default=900, help="seconds between snapshots")
     sp.add_argument("--once", action="store_true")
+
+    sp = add("dashboard-json", cmd_dashboard_json, "print (or write) the JSON snapshot the dashboard displays")
+    sp.add_argument("--out", type=Path, help="write to this file instead of printing")
+    sp.add_argument("--days", type=int, default=500)
+    sp.add_argument("--anchor", help="anchor date (YYYY-MM-DD) for the anchored VWAP")
+    sp.add_argument("--price", type=float, help="use this price instead of fetching spot")
+
+    sp = add("publish", cmd_publish, "compute the snapshot and send it to your Vercel dashboard (token from ETHTRACKER_INGEST_TOKEN)")
+    sp.add_argument("--url", help="dashboard address (default: $ETHTRACKER_DASHBOARD_URL)")
+    sp.add_argument("--interval", type=float, default=60, help="seconds between publishes")
+    sp.add_argument("--once", action="store_true", help="publish once and exit")
+    sp.add_argument("--record", action="store_true", help="also append a Deribit open-interest/funding snapshot each round")
+    sp.add_argument("--days", type=int, default=500)
+    sp.add_argument("--anchor", help="anchor date (YYYY-MM-DD) for the anchored VWAP")
 
     sp = add("signals-study", cmd_signals_study, "how the technical risk-flag count related to later drawdowns and rallies in history")
     sp.add_argument("--horizon", type=int, help="days ahead (default: config max_holding_days)")
