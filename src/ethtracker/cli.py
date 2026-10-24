@@ -471,16 +471,16 @@ def cmd_cloud_run(args, ctx: Ctx) -> int:
     return 0
 
 
-def _cycle_table(title: str, rows: list) -> None:
+def _cycle_table(title: str, rows: list, width: int = 40) -> None:
     spot = rows[0].multiple
     print()
     print(title)
-    print(f"  {'strategy':<40} {'x start':>12} {'vs spot':>8} {'max DD':>7} {'trades':>6} {'in mkt':>6}  liquidated")
+    print(f"  {'strategy':<{width}} {'x start':>12} {'vs spot':>8} {'max DD':>7} {'trades':>6} {'in mkt':>6}  liquidated")
     for r in rows:
         vs = f"{r.multiple / spot:.2f}x" if spot > 0 else "n/a"
         liq = (f"account {r.liquidated:%Y-%m-%d}" if r.liquidated is not None
                else f"{r.lost_positions} position(s)" if r.lost_positions else "")
-        print(f"  {r.name:<40} {r.multiple:>11,.2f}x {vs:>8} {r.max_drawdown:>7.0%} {r.trades:>6} {r.exposure:>6.0%}  {liq}")
+        print(f"  {r.name:<{width}} {r.multiple:>11,.2f}x {vs:>8} {r.max_drawdown:>7.0%} {r.trades:>6} {r.exposure:>6.0%}  {liq}")
 
 
 def _rolling_table(full: pd.DataFrame, cfg) -> None:
@@ -656,6 +656,24 @@ def cmd_combo_study(args, ctx: Ctx) -> int:
 FUNDING_HISTORY_FROM = "2019-01-01"
 
 
+def _funding_history(ctx: Ctx, instrument: str, end: pd.Timestamp) -> tuple[pd.Series, int]:
+    """Deribit's daily funding history, fetched at most once a day per instrument (it takes a minute or two)."""
+    path = ctx.home / "funding" / f"deribit-{instrument}.csv"
+    today = datetime.now(timezone.utc).date()
+    try:
+        if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).date() == today:
+            cached = pd.read_csv(path, index_col=0).iloc[:, 0]
+            cached.index = pd.to_datetime(cached.index, utc=True)
+            return cached.astype(float), 0
+    except (OSError, ValueError, IndexError):
+        pass
+    series, failed = derivs.fetch_funding_history(pd.Timestamp(FUNDING_HISTORY_FROM, tz="UTC"), end, instrument=instrument)
+    if not failed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        series.rename("funding_8h").to_csv(path)
+    return series, failed
+
+
 def _overlay_table(title: str, rows: list) -> None:
     core = rows[0].multiple
     print()
@@ -679,7 +697,7 @@ def cmd_short_study(args, ctx: Ctx) -> int:
           f"Taker fee {cfg.taker_fee_rate:.2%}, maintenance margin {cfg.maintenance_margin_rate:.1%}.")
     funding8h = None
     try:
-        funding8h, failed = derivs.fetch_funding_history(pd.Timestamp(FUNDING_HISTORY_FROM, tz="UTC"), last + pd.Timedelta(days=1))
+        funding8h, failed = _funding_history(ctx, derivs.HISTORY_INSTRUMENT, last + pd.Timedelta(days=1))
         funding8h = funding8h[(funding8h.index >= first) & (funding8h.index <= last)]
         print(f"Funding: Deribit {derivs.HISTORY_INSTRUMENT}, {len(funding8h)} days from {funding8h.index[0]:%Y-%m-%d} to "
               f"{funding8h.index[-1]:%Y-%m-%d}; median {funding8h.median():.4%}/8h, mean {funding8h.mean():.4%}/8h, "
@@ -743,34 +761,66 @@ def cmd_short_study(args, ctx: Ctx) -> int:
     return 0
 
 
-def cmd_swing_study(args, ctx: Ctx) -> int:
+def _asset_history(args, ctx: Ctx, title: str):
+    """Candles and Deribit funding for --asset, with the header lines every per-asset study prints."""
     asset = args.asset.upper()
     product, instrument = swing.INSTRUMENTS[asset]
     provider = _provider(args, ctx, product)
     raw = provider.candles(args.days)
     full, flashes = cycles.ignore_flash_prints(raw)
     cfg = ctx.cfg
-    first, last = full.index[0], full.index[-1]
-    print(f"{asset}: buy a sharp pullback, sell only into a spike. One position at a time, no stop besides liquidation.")
-    print(f"Candles: {len(full)} days of {product}, {first:%Y-%m-%d} to {last:%Y-%m-%d} ({provider.name}). "
+    print(f"{asset}: {title}")
+    print(f"Candles: {len(full)} days of {product}, {full.index[0]:%Y-%m-%d} to {full.index[-1]:%Y-%m-%d} ({provider.name}). "
           f"Taker fee {cfg.taker_fee_rate:.2%}, maintenance margin {cfg.maintenance_margin_rate:.1%}.")
     for day in flashes:
         print(f"Ignored for liquidations, as a perp's mark price would: the {day:%Y-%m-%d} low of {raw.loc[day, 'low']:,.2f}.")
     funding8h = None
     try:
-        funding8h, failed = derivs.fetch_funding_history(pd.Timestamp(FUNDING_HISTORY_FROM, tz="UTC"), last + pd.Timedelta(days=1),
-                                                         instrument=instrument)
-        funding8h = funding8h[(funding8h.index >= first) & (funding8h.index <= last)]
+        funding8h, failed = _funding_history(ctx, instrument, full.index[-1] + pd.Timedelta(days=1))
+        funding8h = funding8h[(funding8h.index >= full.index[0]) & (funding8h.index <= full.index[-1])]
         print(f"Funding: Deribit {instrument}, {len(funding8h)} days from {funding8h.index[0]:%Y-%m-%d}; median {funding8h.median():.4%}/8h, "
               f"mean {funding8h.mean():.4%}/8h, {(funding8h < 0).mean():.0%} of days negative"
               + (f"; {failed} monthly page(s) failed" if failed else "") + f". Before that {cfg.funding_rate_8h:.3%}/8h is assumed.")
     except DataError as exc:
         print(f"Funding history unavailable ({exc}); {cfg.funding_rate_8h:.3%}/8h is assumed throughout.")
-    rules = swing.Rules(full, cfg, funding8h)
     now = swing.today(full)
     print(f"Today: {now.close:,.2f}, {now.below_high:.0%} below the highest close, {now.below_30d_high:.0%} below the 30-day high, "
           f"RSI {now.rsi:.0f}, {now.run_14d:+.0%} on the 14-day low close.")
+    return asset, full, cfg, funding8h
 
+
+def _asset_tables(asset: str, full: pd.DataFrame, cfg, run, width: int = 40) -> None:
+    """The same four views for any per-asset study: whole history, bull phases, the current bear, 4-year windows."""
+    first, last = full.index[0], full.index[-1]
+    phases = cycles.find_phases(full)
+    bulls = [ph for ph in phases if ph.kind == "bull" and ph.from_bottom and ph.complete]
+    _cycle_table(f"Whole history {first:%Y-%m-%d} to {last:%Y-%m-%d}, no hindsight", run(full, first, last, cfg), width)
+    windows = [run(full, ph.start, ph.end, cfg) for ph in bulls]
+    if windows:
+        spans = ", ".join(f"{ph.start:%Y-%m-%d} to {ph.end:%Y-%m-%d}" for ph in bulls)
+        _cycle_table(f"Bull phases only, bottom to top, back to back (hindsight): {spans}",
+                     cycles.chain(windows) if len(windows) > 1 else windows[0], width)
+    current = phases[-1]
+    if current.kind == "bear" and not current.complete:
+        _cycle_table(f"Current bear phase {current.start:%Y-%m-%d} to {current.end:%Y-%m-%d} (from the top)",
+                     run(full, current.start, current.end, cfg), width)
+    depth = swing.today_depth(full)
+    starts = cycles.deep_starts(full, depth=depth)
+    if starts:
+        groups = cycles.episodes(starts)
+        print()
+        print(f"From every week {asset} closed {depth:.0%}+ below its highest close so far (today: {swing.today(full).below_high:.0%}), "
+              f"{cycles.HORIZON_YEARS} years forward, no hindsight: {len(starts)} starts in {len(groups)} separate drawdowns")
+        print(f"  {'strategy':<{width}} {'median x':>10} {'beat spot':>9} {'liquidated':>10} {'worst':>7}")
+        for r in cycles.rolling(full, cfg, starts, runner=run):
+            print(f"  {r.name:<{width}} {r.median_multiple:>9,.2f}x {r.beat_spot:>9.0%} {r.liquidated:>10.0%} {r.worst:>6.2f}x")
+
+
+def cmd_swing_study(args, ctx: Ctx) -> int:
+    asset, full, cfg, funding8h = _asset_history(
+        args, ctx, "buy a sharp pullback, sell only into a spike. One position at a time, no stop besides liquidation.")
+    rules = swing.Rules(full, cfg, funding8h)
+    first, last = full.index[0], full.index[-1]
     phases = cycles.find_phases(full)
     bulls = [ph for ph in phases if ph.kind == "bull" and ph.from_bottom and ph.complete]
     periods = [("Whole history", first, last)]
@@ -786,32 +836,29 @@ def cmd_swing_study(args, ctx: Ctx) -> int:
         cost = rules.cost(start, end)
         print(f"  {label:<30} {g.vol:>10.0%} {np.expm1(g.drift):>+8.0%} {np.expm1(g.at(2.5, cost)):>+8.0%} {g.kelly(cost):>14.2f}x")
     print("  (spot and 2.5x as compound growth a year)")
-
-    _cycle_table(f"Whole history {first:%Y-%m-%d} to {last:%Y-%m-%d}, no hindsight", rules.run(full, first, last, cfg))
-    windows = [rules.run(full, ph.start, ph.end, cfg) for ph in bulls]
-    if windows:
-        spans = ", ".join(f"{ph.start:%Y-%m-%d} to {ph.end:%Y-%m-%d}" for ph in bulls)
-        _cycle_table(f"Bull phases only, bottom to top, back to back (hindsight): {spans}",
-                     cycles.chain(windows) if len(windows) > 1 else windows[0])
-    current = phases[-1]
-    if current.kind == "bear" and not current.complete:
-        _cycle_table(f"Current bear phase {current.start:%Y-%m-%d} to {current.end:%Y-%m-%d} (from the top)",
-                     rules.run(full, current.start, current.end, cfg))
-    depth = swing.today_depth(full)
-    starts = cycles.deep_starts(full, depth=depth)
-    if starts:
-        groups = cycles.episodes(starts)
-        print()
-        print(f"From every week {asset} closed {depth:.0%}+ below its highest close so far (today: {now.below_high:.0%}), "
-              f"{cycles.HORIZON_YEARS} years forward, no hindsight: {len(starts)} starts in {len(groups)} separate drawdowns")
-        print(f"  {'strategy':<40} {'median x':>10} {'beat spot':>9} {'liquidated':>10} {'worst':>7}")
-        for r in cycles.rolling(full, cfg, starts, runner=rules.run):
-            print(f"  {r.name:<40} {r.median_multiple:>9,.2f}x {r.beat_spot:>9.0%} {r.liquidated:>10.0%} {r.worst:>6.2f}x")
+    _asset_tables(asset, full, cfg, rules.run)
     print()
     print(f"Entries: the first close {{20%, 25%}} below the {cycles.DIP_LOOKBACK}-day high, or the first close back above the "
           f"10-day average within {cycles.CONFIRM_WITHIN} days of a 20% dip.")
     print(f"Exits: RSI(14) at {swing.SPIKE_RSI:.0f}+, or a close {swing.RUN:.0%}+ above the lowest close of the last {swing.RUN_DAYS} days. "
           "No time stop, no price stop: liquidation is the only other way out.")
+    return 0
+
+
+def cmd_trim_study(args, ctx: Ctx) -> int:
+    asset, full, cfg, funding8h = _asset_history(
+        args, ctx, "trim into spikes and refill on dips, with the liquidation price pinned where it started.")
+    rules = swing.PinnedRules(full, cfg, funding8h)
+    now = swing.today(full)
+    mmr = cfg.maintenance_margin_rate
+    print("Pinned liquidation prices if opened today: " + ", ".join(
+        f"{lev:g}x at {swing.pinned_floor(now.close, lev, mmr):,.0f}" for lev in (2.5, 2.0, 1.5)) + ".")
+    _asset_tables(asset, full, cfg, rules.run, width=58)
+    print()
+    print("Pinned: the position opens at the stated leverage and its liquidation price is never allowed above that first level;")
+    print("funding creep is trimmed away each close. Trims sell a share on the first day of a spike (RSI 80+, or a close 30%+ above")
+    print("the 14-day low close) and keep the cash as margin; refills buy back up to the pinned liquidation price on the first")
+    print("close 20% below the 30-day high. You end up holding more only when a refill happens below the price of the trim before it.")
     return 0
 
 
@@ -1256,6 +1303,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--days", type=int, default=500)
 
     sp = add("swing-study", cmd_swing_study, "buy a sharp pullback, sell only into a spike, on ETH or BTC, versus holding spot")
+    sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
+
+    sp = add("trim-study", cmd_trim_study, "trim into spikes, refill on dips, liquidation pinned to one price, on ETH or BTC")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
 

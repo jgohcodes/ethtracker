@@ -85,3 +85,10 @@ jobs:
       - name: Swing study, BTC
         if: ${{ inputs.study }}
         run: ethtracker swing-study --asset BTC --days 4000
+      # Trim into spikes, refill on dips, with the liquidation price pinned where it started.
+      - name: Trim study, ETH
+        if: ${{ inputs.study }}
+        run: ethtracker trim-study --asset ETH --days 4000
+      - name: Trim study, BTC
+        if: ${{ inputs.study }}
+        run: ethtracker trim-study --asset BTC --days 4000

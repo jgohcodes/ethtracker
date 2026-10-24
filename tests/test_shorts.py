@@ -1,10 +1,11 @@
+import shutil
 from dataclasses import replace
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from ethtracker import combo, derivs, shorts
+from ethtracker import combo, config, derivs, shorts
 from ethtracker.cli import main
 from ethtracker.config import Config
 from ethtracker.data import DataError
@@ -171,6 +172,8 @@ def test_short_study_command_with_and_without_funding(tmp_path, capsys, monkeypa
 
     def broken(start, end, **kwargs):
         raise DataError("blocked")
+
+    shutil.rmtree(config.home() / "funding")  # today's cached history would otherwise be reused
 
     monkeypatch.setattr(derivs, "fetch_funding_history", broken)
     assert main(args) == 0
