@@ -29,7 +29,7 @@ class CachedProvider:
     def __init__(self, inner: Provider, directory: Path):
         self.inner = inner
         self.name = inner.name
-        self.path = directory / f"{inner.name}-ETH-USD-1d.csv"
+        self.path = directory / f"{inner.name}-{getattr(inner, 'product', 'ETH-USD')}-1d.csv"
         self.meta_path = self.path.with_suffix(".json")
 
     def spot(self) -> float:

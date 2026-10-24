@@ -168,7 +168,7 @@ class Result:
 
 def simulate(name: str, df: pd.DataFrame, cfg: Config, *, leverage: float, entries: np.ndarray | None = None,
              exits: np.ndarray | None = None, max_hold: int | None = None, core: bool = False,
-             isolated: float | None = None) -> Result:
+             isolated: float | None = None, funding: np.ndarray | None = None) -> Result:
     """One account, starting at 1.0, over ``df``.
 
     ``core`` buys spot with all the equity on the first day and keeps it. A perpetual long opens at the
@@ -178,11 +178,15 @@ def simulate(name: str, df: pd.DataFrame, cfg: Config, *, leverage: float, entri
 
     ``isolated`` instead posts that fraction of equity as isolated margin at ``leverage`` (exchange
     leverage): a liquidation then loses that margin and the account carries on.
+
+    ``funding`` gives each day's funding as a fraction of notional (paid by longs); without it the
+    configured 8-hour rate is charged every day.
     """
     close, low = df["close"].to_numpy(float), df["low"].to_numpy(float)
     n = len(close)
     fee, mmr = cfg.taker_fee_rate, cfg.maintenance_margin_rate
-    funding = cfg.funding_rate_8h * FUNDING_PERIODS_PER_DAY
+    if funding is None:
+        funding = np.full(n, cfg.funding_rate_8h * FUNDING_PERIODS_PER_DAY)
     if entries is None:
         entries = np.zeros(n, dtype=bool)
         entries[0] = not core
@@ -206,7 +210,7 @@ def simulate(name: str, df: pd.DataFrame, cfg: Config, *, leverage: float, entri
             liquidated = df.index[i]
             break
         if qty:
-            cash -= funding * qty * close[i]
+            cash -= funding[i] * qty * close[i]
             if exits[i] or (max_hold is not None and i - opened >= max_hold):
                 cash += qty * (close[i] - entry) - fee * qty * close[i]
                 qty = 0.0

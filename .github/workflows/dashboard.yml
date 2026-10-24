@@ -78,3 +78,10 @@ jobs:
       - name: Short study
         if: ${{ inputs.study }}
         run: ethtracker short-study --days 4000
+      # Buy a sharp pullback, sell only into a spike: on ETH and on BTC.
+      - name: Swing study, ETH
+        if: ${{ inputs.study }}
+        run: ethtracker swing-study --asset ETH --days 4000
+      - name: Swing study, BTC
+        if: ${{ inputs.study }}
+        run: ethtracker swing-study --asset BTC --days 4000

@@ -88,7 +88,7 @@ def test_snapshot_from_csv(capsys, candles_csv):
 def test_sync_fills_the_cache_through_the_wrapper(capsys, monkeypatch):
     from tests.test_store import Fake
 
-    monkeypatch.setattr("ethtracker.cli.get_provider", lambda name, csv_path=None: Fake())
+    monkeypatch.setattr("ethtracker.cli.get_provider", lambda name, csv_path=None, product="ETH-USD": Fake())
     code, out = run(capsys, "sync", "--days", 50)
     assert code == 0 and "50 daily candles" in out
     assert (config.home() / "candles" / "fake-ETH-USD-1d.csv").exists()
@@ -291,7 +291,7 @@ class SequenceProvider:
 
 def watch_polls(monkeypatch, capsys, candles, prices, *extra):
     provider = SequenceProvider(prices, candles)
-    monkeypatch.setattr("ethtracker.cli.get_provider", lambda name, csv_path=None: provider)
+    monkeypatch.setattr("ethtracker.cli.get_provider", lambda name, csv_path=None, product="ETH-USD": provider)
     sleeps = []
 
     def sleeper(seconds):

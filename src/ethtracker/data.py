@@ -81,10 +81,12 @@ class Coinbase:
     """
 
     name = "coinbase"
-    spot_url = "https://api.coinbase.com/v2/prices/ETH-USD/spot"
     base = "https://api.exchange.coinbase.com"
-    product = "ETH-USD"
     max_candles = 300
+
+    def __init__(self, product: str = "ETH-USD"):
+        self.product = product
+        self.spot_url = f"https://api.coinbase.com/v2/prices/{product}/spot"
 
     def spot(self) -> float:
         return parse_coinbase_spot(_get_json(self.spot_url))
@@ -154,10 +156,13 @@ class Csv:
         return self._load().tail(days)
 
 
-def get_provider(name: str, csv_path: Path | None = None) -> Provider:
+def get_provider(name: str, csv_path: Path | None = None, product: str = "ETH-USD") -> Provider:
+    """``product`` picks the market for Coinbase; Kraken here serves ETH-USD only, and a CSV is whatever it holds."""
     if name == "coinbase":
-        return Coinbase()
+        return Coinbase(product)
     if name == "kraken":
+        if product != "ETH-USD":
+            raise DataError(f"the kraken provider serves ETH-USD only, not {product}")
         return Kraken()
     if name == "csv":
         if csv_path is None:

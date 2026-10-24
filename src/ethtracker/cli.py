@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, combo, config, cycles, derivs, indicators, risk, shorts, signals, snapshot, study
+from . import advice, alerts, combo, config, cycles, derivs, indicators, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -48,9 +48,9 @@ def na(x, fmt) -> str:
     return "n/a" if x is None else fmt(x)
 
 
-def _provider(args, ctx: Ctx) -> Provider:
+def _provider(args, ctx: Ctx, product: str = "ETH-USD") -> Provider:
     """The configured source; network sources go through the local candle cache unless --no-cache."""
-    provider = get_provider(args.provider or ctx.cfg.provider, args.csv)
+    provider = get_provider(args.provider or ctx.cfg.provider, args.csv, product)
     if provider.name == "csv" or args.no_cache:
         return provider
     return CachedProvider(provider, ctx.home / "candles")
@@ -743,6 +743,78 @@ def cmd_short_study(args, ctx: Ctx) -> int:
     return 0
 
 
+def cmd_swing_study(args, ctx: Ctx) -> int:
+    asset = args.asset.upper()
+    product, instrument = swing.INSTRUMENTS[asset]
+    provider = _provider(args, ctx, product)
+    raw = provider.candles(args.days)
+    full, flashes = cycles.ignore_flash_prints(raw)
+    cfg = ctx.cfg
+    first, last = full.index[0], full.index[-1]
+    print(f"{asset}: buy a sharp pullback, sell only into a spike. One position at a time, no stop besides liquidation.")
+    print(f"Candles: {len(full)} days of {product}, {first:%Y-%m-%d} to {last:%Y-%m-%d} ({provider.name}). "
+          f"Taker fee {cfg.taker_fee_rate:.2%}, maintenance margin {cfg.maintenance_margin_rate:.1%}.")
+    for day in flashes:
+        print(f"Ignored for liquidations, as a perp's mark price would: the {day:%Y-%m-%d} low of {raw.loc[day, 'low']:,.2f}.")
+    funding8h = None
+    try:
+        funding8h, failed = derivs.fetch_funding_history(pd.Timestamp(FUNDING_HISTORY_FROM, tz="UTC"), last + pd.Timedelta(days=1),
+                                                         instrument=instrument)
+        funding8h = funding8h[(funding8h.index >= first) & (funding8h.index <= last)]
+        print(f"Funding: Deribit {instrument}, {len(funding8h)} days from {funding8h.index[0]:%Y-%m-%d}; median {funding8h.median():.4%}/8h, "
+              f"mean {funding8h.mean():.4%}/8h, {(funding8h < 0).mean():.0%} of days negative"
+              + (f"; {failed} monthly page(s) failed" if failed else "") + f". Before that {cfg.funding_rate_8h:.3%}/8h is assumed.")
+    except DataError as exc:
+        print(f"Funding history unavailable ({exc}); {cfg.funding_rate_8h:.3%}/8h is assumed throughout.")
+    rules = swing.Rules(full, cfg, funding8h)
+    now = swing.today(full)
+    print(f"Today: {now.close:,.2f}, {now.below_high:.0%} below the highest close, {now.below_30d_high:.0%} below the 30-day high, "
+          f"RSI {now.rsi:.0f}, {now.run_14d:+.0%} on the 14-day low close.")
+
+    phases = cycles.find_phases(full)
+    bulls = [ph for ph in phases if ph.kind == "bull" and ph.from_bottom and ph.complete]
+    periods = [("Whole history", first, last)]
+    if bulls:
+        periods.append((f"Since the {bulls[0].start:%Y-%m-%d} bottom", bulls[0].start, last))
+    periods += [(f"Bull {ph.start:%Y}-{ph.end:%Y}, bottom to top", ph.start, ph.end) for ph in bulls]
+    periods.append(("Last 4 years", last - pd.DateOffset(years=4), last))
+    print()
+    print("Volatility and the leverage that maximises growth (funding at each period's average)")
+    print(f"  {'period':<30} {'volatility':>10} {'spot':>8} {'2.5x':>8} {'growth-optimal':>15}")
+    for label, start, end in periods:
+        g = combo.growth(full[start:end], label)
+        cost = rules.cost(start, end)
+        print(f"  {label:<30} {g.vol:>10.0%} {np.expm1(g.drift):>+8.0%} {np.expm1(g.at(2.5, cost)):>+8.0%} {g.kelly(cost):>14.2f}x")
+    print("  (spot and 2.5x as compound growth a year)")
+
+    _cycle_table(f"Whole history {first:%Y-%m-%d} to {last:%Y-%m-%d}, no hindsight", rules.run(full, first, last, cfg))
+    windows = [rules.run(full, ph.start, ph.end, cfg) for ph in bulls]
+    if windows:
+        spans = ", ".join(f"{ph.start:%Y-%m-%d} to {ph.end:%Y-%m-%d}" for ph in bulls)
+        _cycle_table(f"Bull phases only, bottom to top, back to back (hindsight): {spans}",
+                     cycles.chain(windows) if len(windows) > 1 else windows[0])
+    current = phases[-1]
+    if current.kind == "bear" and not current.complete:
+        _cycle_table(f"Current bear phase {current.start:%Y-%m-%d} to {current.end:%Y-%m-%d} (from the top)",
+                     rules.run(full, current.start, current.end, cfg))
+    depth = swing.today_depth(full)
+    starts = cycles.deep_starts(full, depth=depth)
+    if starts:
+        groups = cycles.episodes(starts)
+        print()
+        print(f"From every week {asset} closed {depth:.0%}+ below its highest close so far (today: {now.below_high:.0%}), "
+              f"{cycles.HORIZON_YEARS} years forward, no hindsight: {len(starts)} starts in {len(groups)} separate drawdowns")
+        print(f"  {'strategy':<40} {'median x':>10} {'beat spot':>9} {'liquidated':>10} {'worst':>7}")
+        for r in cycles.rolling(full, cfg, starts, runner=rules.run):
+            print(f"  {r.name:<40} {r.median_multiple:>9,.2f}x {r.beat_spot:>9.0%} {r.liquidated:>10.0%} {r.worst:>6.2f}x")
+    print()
+    print(f"Entries: the first close {{20%, 25%}} below the {cycles.DIP_LOOKBACK}-day high, or the first close back above the "
+          f"10-day average within {cycles.CONFIRM_WITHIN} days of a 20% dip.")
+    print(f"Exits: RSI(14) at {swing.SPIKE_RSI:.0f}+, or a close {swing.RUN:.0%}+ above the lowest close of the last {swing.RUN_DAYS} days. "
+          "No time stop, no price stop: liquidation is the only other way out.")
+    return 0
+
+
 def cmd_signals_study(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
     df = provider.candles(args.days)
@@ -1182,6 +1254,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="fetch live data and compute, but publish nothing (needs no dashboard)")
     sp.add_argument("--out", type=Path, help="also write the snapshot JSON here")
     sp.add_argument("--days", type=int, default=500)
+
+    sp = add("swing-study", cmd_swing_study, "buy a sharp pullback, sell only into a spike, on ETH or BTC, versus holding spot")
+    sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
 
     sp = add("short-study", cmd_short_study, "short-term shorts on overheating signals, alone and as a cut to the leveraged core")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch (Coinbase ETH-USD starts in May 2016)")
