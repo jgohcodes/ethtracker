@@ -1,6 +1,6 @@
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
-  priceLadder, isValidSymbol,
+  priceLadder, isValidSymbol, describeInterval,
 } from "./format.mjs";
 
 const TOKEN_KEY = "ethtracker.viewToken";
@@ -87,17 +87,21 @@ function updateFreshness() {
   const chip = $("freshness");
   if (!snap) { chip.hidden = true; return; }
   const age = ageSeconds(snap.received_at ?? snap.generated_at);
-  const level = freshness(age);
+  const interval = snap.refresh_seconds ?? 60;
+  const level = freshness(age, interval);
   const style = {
-    fresh: ["good", "✓", "Live"], delayed: ["warning", "!", "Delayed"], stale: ["critical", "✕", "Stale"], unknown: ["muted", "?", "Unknown"],
+    fresh: ["good", "✓", "Updated"], delayed: ["warning", "!", "Late"], stale: ["critical", "✕", "Stale"], unknown: ["muted", "?", "Unknown"],
   }[level];
   chip.replaceChildren(h("span", { class: "badge__icon", "aria-hidden": "true", text: style[1] }), `${style[2]} · ${humanAge(age)}`);
   chip.dataset.tone = style[0];
   chip.hidden = false;
+  const fix = snap.publisher === "github-actions"
+    ? "Check the \u201cDaily dashboard\u201d workflow in your repository's Actions tab."
+    : "Check that `ethtracker publish` is running.";
   if (level === "stale") {
-    setBanner("critical", "Stale", "The last snapshot is more than 10 minutes old, so positions and advice may be out of date. Check that `ethtracker publish` is running.", "freshness");
+    setBanner("critical", "Stale", `The last update was ${humanAge(age)} and updates are expected ${describeInterval(interval)}, so positions and advice may be out of date. ${fix}`, "freshness");
   } else if (level === "delayed") {
-    setBanner("warning", "Delayed", "Snapshots are arriving later than expected. Positions and advice may lag the market.", "freshness");
+    setBanner("warning", "Late", `The next update is overdue (expected ${describeInterval(interval)}). Positions and advice may lag the market. ${fix}`, "freshness");
   } else if (bannerKind === "freshness") {
     setBanner(null);
   }
@@ -271,12 +275,16 @@ function renderClosed(s) {
 }
 
 function renderHeader(s) {
-  fill($("price"), usd(s.price), " ", s.price_1d === null || s.price_1d === undefined ? null : delta(s.price_1d, `${signedPct(s.price_1d)} vs last close`));
+  const basis = s.basis === "close" && s.close_date ? `signals on the ${s.close_date} daily close` : "signals include today's unfinished candle";
+  fill($("price"), usd(s.price), " ",
+    s.price_1d === null || s.price_1d === undefined ? null : delta(s.price_1d, `${signedPct(s.price_1d)} vs last daily close`),
+    h("span", { class: "bar__basis", text: basis }));
 }
 
 function renderFoot(s) {
+  const by = s.publisher === "github-actions" ? "the daily GitHub Actions job" : s.publisher === "local" ? "ethtracker on your machine" : "ethtracker";
   $("foot").textContent =
-    `Computed by ethtracker on your machine at ${s.generated_at} and published here; this page only displays it. ` +
+    `Computed by ${by} at ${s.generated_at} (${describeInterval(s.refresh_seconds ?? 60)} updates); this page only displays it. ` +
     `Candles from ${s.source || "unknown"}; derivatives signals use ${s.config.instrument} and are unvalidated. ` +
     "The chart is TradingView's embedded widget: it cannot draw your levels, which is what the price ladder is for.";
 }

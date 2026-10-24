@@ -3,11 +3,12 @@
 // The dashboard's two endpoints. They only store and return a snapshot that `ethtracker publish`
 // computed on your machine, so this app needs no data libraries and holds no exchange keys.
 //
-//   POST /api/ingest    Authorization: Bearer $INGEST_TOKEN    (held by your machine only)
-//   GET  /api/snapshot  Authorization: Bearer $DASHBOARD_TOKEN (held by the browser)
+//   POST /api/ingest              Authorization: Bearer $INGEST_TOKEN    (your machine and the daily job)
+//   GET  /api/snapshot            Authorization: Bearer $DASHBOARD_TOKEN (the browser)
+//   GET|PUT /api/state?name=...   Authorization: Bearer $INGEST_TOKEN    (journal, derivs: the daily job's memory)
 //
-// Two tokens on purpose: the browser's read token cannot overwrite what the dashboard shows, and
-// the write token never leaves your machine.
+// Two tokens on purpose: the browser's read token can neither overwrite what the dashboard shows nor read
+// the raw journal, and the write token never reaches a browser.
 
 const crypto = require("node:crypto");
 
@@ -17,6 +18,7 @@ const MAX_BYTES = 256 * 1024;
 const TTL_SECONDS = 7 * 24 * 3600; // a snapshot nobody refreshed for a week disappears instead of lingering
 const MAX_POSITIONS = 50;
 const MAX_SIGNALS = 100;
+const STATE_LIMITS = { journal: 256 * 1024, derivs: 768 * 1024 }; // bytes of content per state document
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -55,7 +57,7 @@ function parseJson(text) {
   }
 }
 
-async function readBody(req) {
+async function readBody(req, maxBytes = MAX_BYTES) {
   if (req.body !== undefined && req.body !== null) {
     // Vercel pre-parses JSON bodies; accept an object, a string or a buffer.
     if (Buffer.isBuffer(req.body)) return parseJson(req.body.toString("utf8"));
@@ -66,7 +68,7 @@ async function readBody(req) {
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BYTES) throw new HttpError(413, "snapshot too large");
+    if (size > maxBytes) throw new HttpError(413, "body too large");
     chunks.push(chunk);
   }
   return parseJson(Buffer.concat(chunks).toString("utf8"));
@@ -161,10 +163,65 @@ function createHandlers({ getRedis, env = process.env, now = () => new Date() })
     return send(res, 200, { ok: true, received_at: stored.received_at });
   }
 
-  return { snapshot, ingest };
+  // The daily job's memory: your journal (pushed by `ethtracker publish`) and the derivatives history it
+  // accumulates. Write-token only, an allowlist of names, a size cap each, and no expiry.
+  async function state(req, res) {
+    if (req.method !== "GET" && req.method !== "PUT") return send(res, 405, { error: "method not allowed" }, { Allow: "GET, PUT" });
+    if (!env.INGEST_TOKEN) return send(res, 500, { error: "INGEST_TOKEN is not configured" });
+    if (!tokenMatches(bearer(req), env.INGEST_TOKEN)) return send(res, 401, { error: "unauthorized" });
+    const name = new URL(req.url ?? "/", "http://localhost").searchParams.get("name");
+    if (!Object.hasOwn(STATE_LIMITS, name ?? "")) return send(res, 400, { error: `name must be one of: ${Object.keys(STATE_LIMITS).join(", ")}` });
+    const key = `ethtracker:state:${name}`;
+
+    if (req.method === "GET") {
+      let raw;
+      try {
+        raw = await getRedis().get(key);
+      } catch (error) {
+        return storageFailure(res, error);
+      }
+      if (raw === null || raw === undefined) return send(res, 404, { error: `no ${name} stored yet` });
+      try {
+        return send(res, 200, typeof raw === "string" ? JSON.parse(raw) : raw);
+      } catch {
+        return send(res, 502, { error: `stored ${name} is corrupt` });
+      }
+    }
+
+    let body;
+    try {
+      body = await readBody(req, STATE_LIMITS[name] * 2);
+    } catch (error) {
+      return send(res, error.status ?? 400, { error: error.message });
+    }
+    if (body === null || typeof body !== "object" || typeof body.content !== "string") {
+      return send(res, 400, { error: "body must be {\"content\": \"...\"}" });
+    }
+    if (Buffer.byteLength(body.content) > STATE_LIMITS[name]) return send(res, 413, { error: `${name} too large` });
+    if (name === "journal") {
+      let journal;
+      try {
+        journal = JSON.parse(body.content);
+      } catch {
+        return send(res, 400, { error: "journal content must be JSON" });
+      }
+      if (journal === null || typeof journal !== "object" || !Array.isArray(journal.positions)) {
+        return send(res, 400, { error: "journal must be an object with a positions array" });
+      }
+    }
+    const stored = { content: body.content, updated_at: now().toISOString() };
+    try {
+      await getRedis().set(key, JSON.stringify(stored));
+    } catch (error) {
+      return storageFailure(res, error);
+    }
+    return send(res, 200, { ok: true, updated_at: stored.updated_at });
+  }
+
+  return { snapshot, ingest, state };
 }
 
 module.exports = {
   createHandlers, defaultRedis, tokenMatches, validate, ConfigError,
-  SNAPSHOT_KEY, MAX_BYTES, TTL_SECONDS, MAX_POSITIONS, MAX_SIGNALS, SUPPORTED_VERSION,
+  SNAPSHOT_KEY, MAX_BYTES, TTL_SECONDS, MAX_POSITIONS, MAX_SIGNALS, SUPPORTED_VERSION, STATE_LIMITS,
 };

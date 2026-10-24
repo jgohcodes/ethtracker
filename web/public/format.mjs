@@ -1,8 +1,8 @@
 // Pure helpers for the dashboard: number formatting, snapshot freshness and the ordering of the price ladder.
 // Kept free of the DOM so they can be tested under Node.
 
-export const FRESH_SECONDS = 180; // `ethtracker publish` runs every 60s by default
-export const STALE_SECONDS = 600;
+export const FRESH_SECONDS = 180; // for the 60-second default cadence
+export const STALE_SECONDS = 600; // never call anything stale sooner than this
 
 const finite = (x) => typeof x === "number" && Number.isFinite(x);
 
@@ -36,11 +36,29 @@ export function ageSeconds(iso, now = Date.now()) {
   return Number.isNaN(then) ? null : Math.max(0, (now - then) / 1000);
 }
 
-export function freshness(age) {
+// Judged against the cadence the publisher declares: current until one interval plus slack has passed,
+// stale after two. A daily snapshot is current for 30 hours; a 60-second one goes stale after 10 minutes.
+export function freshnessThresholds(interval = 60) {
+  const step = finite(interval) && interval > 0 ? interval : 60;
+  const grace = Math.max(120, 0.25 * step);
+  return { fresh: step + grace, stale: Math.max(STALE_SECONDS, 2 * step + grace) };
+}
+
+export function freshness(age, interval = 60) {
   if (age === null || age === undefined) return "unknown";
-  if (age <= FRESH_SECONDS) return "fresh";
-  if (age <= STALE_SECONDS) return "delayed";
+  const limits = freshnessThresholds(interval);
+  if (age <= limits.fresh) return "fresh";
+  if (age <= limits.stale) return "delayed";
   return "stale";
+}
+
+export function describeInterval(seconds) {
+  if (!finite(seconds) || seconds <= 0) return "at an unknown interval";
+  if (seconds === 86400) return "daily";
+  if (seconds % 86400 === 0) return `every ${seconds / 86400} days`;
+  if (seconds >= 3600) return `every ${Math.round(seconds / 3600)}h`;
+  if (seconds >= 60) return `every ${Math.round(seconds / 60)} min`;
+  return `every ${Math.round(seconds)}s`;
 }
 
 export function humanAge(seconds) {

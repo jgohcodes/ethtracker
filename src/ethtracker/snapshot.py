@@ -1,11 +1,16 @@
-"""The dashboard's data: one JSON snapshot of the book and the market, and the call that publishes it.
+"""The dashboard's data: one JSON snapshot of the book and the market, and the calls that move it.
 
-Everything is computed here, on your machine, by the same functions behind ``signals`` and ``advise``,
-so the dashboard cannot disagree with the CLI. The hosted dashboard only stores and displays the result:
-it never sees an exchange key and never runs the maths.
+Everything is computed by the same functions behind ``signals`` and ``advise``, so the dashboard cannot
+disagree with the CLI. The hosted dashboard only stores and displays results: it never sees an exchange
+key and never runs the maths.
 
-The snapshot contains your equity and positions. It is sent over HTTPS with a bearer token and stored in
-the dashboard's Redis, so treat the dashboard as holding that data.
+Two producers publish snapshots: the daily job (``cloud-run``, on GitHub Actions) and ``publish`` on your
+machine. Both compute signals on **completed daily candles** by default, because you trade the 1D chart
+and an unfinished day repaints. Positions are marked at the current spot price.
+
+The dashboard also keeps two pieces of state for the daily job: your journal (pushed by ``publish``) and
+the open-interest/funding history the job accumulates. Both live in the dashboard's Redis, never in the
+repository. The snapshot contains your equity and positions, so treat the dashboard as holding that data.
 """
 
 from __future__ import annotations
@@ -24,7 +29,10 @@ from .journal import Journal
 
 VERSION = 1
 RECENT_CLOSED = 5
+DAY_SECONDS = 86_400
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+STATE_NAMES = ("journal", "derivs")
+BASES = ("close", "live")
 
 
 def _clean(value):
@@ -38,6 +46,11 @@ def _clean(value):
     return value
 
 
+def closed_candles(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
+    """Only days that have finished (UTC): today's candle is still forming."""
+    return df[df.index < pd.Timestamp(now).tz_convert("UTC").normalize()]
+
+
 def build(
     cfg: Config,
     journal: Journal,
@@ -48,10 +61,20 @@ def build(
     now: datetime | None = None,
     anchor: pd.Timestamp | None = None,
     source: str = "",
+    basis: str = "close",
+    refresh_seconds: int | None = None,
+    publisher: str = "local",
 ) -> dict:
+    """Assemble the snapshot. ``basis="close"`` computes signals on completed daily candles only;
+    ``"live"`` folds the current price into today's unfinished candle. Positions are marked at ``price``."""
+    if basis not in BASES:
+        raise ValueError(f"basis must be one of {BASES}")
     now = now or datetime.now(timezone.utc)
-    priced = indicators.with_price(df, price)
-    sigs = signals.compute(cfg, priced, derivs, anchor)
+    closed = closed_candles(df, now)
+    if closed.empty:
+        raise DataError("no completed daily candles to compute signals from")
+    frame = closed if basis == "close" else indicators.with_price(df, price)
+    sigs = signals.compute(cfg, frame, derivs, anchor)
     statuses = [risk.mark_position(cfg, p, price, now) for p in journal.open_positions()]
     isolated = cfg.margin_mode == "isolated"
 
@@ -82,7 +105,7 @@ def build(
     positions = []
     for status in statuses:
         p = status.position
-        a = advice.assess(cfg, p, status, sigs, priced, book_flags)
+        a = advice.assess(cfg, p, status, sigs, frame, book_flags)
         positions.append({
             "id": p.id, "side": p.side, "qty": p.qty, "entry": p.entry, "leverage": p.leverage,
             "stop": p.stop, "target": p.target, "opened_at": p.opened_at, "note": p.note,
@@ -97,7 +120,7 @@ def build(
             "net_score": a.net_score, "risk_flags": a.risk_flags, "deep_itm": a.deep_itm,
         })
 
-    closed = [
+    closed_trades = [
         {
             "id": p.id, "side": p.side, "entry": p.entry, "exit": p.exit_price, "closed_at": p.closed_at,
             "realized_pnl": p.realized_pnl,
@@ -106,16 +129,22 @@ def build(
         for p in journal.closed_positions()[-RECENT_CLOSED:][::-1]
     ]
 
+    last_close = float(closed["close"].iloc[-1])
     snap = {
         "version": VERSION,
         "generated_at": now.isoformat(timespec="seconds"),
+        "publisher": publisher,
+        "refresh_seconds": refresh_seconds,
+        "basis": basis,
+        "close_date": f"{closed.index[-1]:%Y-%m-%d}",
+        "last_close": last_close,
         "price": float(price),
-        "price_1d": float(price / df["close"].iloc[-2] - 1) if len(df) >= 2 else None,
+        "price_1d": float(price / last_close - 1),
         "source": source,
         "equity": equity_block,
         "portfolio": portfolio,
         "positions": positions,
-        "closed": closed,
+        "closed": closed_trades,
         "signals": [
             {"name": g.name, "family": g.family or g.name, "bias": g.bias, "risk": g.risk,
              "headline": g.headline, "unvalidated": g.unvalidated}
@@ -135,26 +164,88 @@ def build(
     return _clean(snap)
 
 
-def ingest_endpoint(base: str) -> str:
-    """The ingest URL for a dashboard base URL. The token travels in a header, so plain http is refused off localhost."""
+def public_summary(snap: dict) -> str:
+    """One line safe for public CI logs: market facts and counts, never equity, sizes or positions' details."""
+    votes = ", ".join(f"{k} {v:+d}" for k, v in snap["votes"].items() if v) or "none"
+    risk_flags = sum(1 for s in snap["signals"] if s["risk"])
+    derivs = "yes" if any(s["name"] in ("funding", "oi_change", "oi_level") for s in snap["signals"]) else "no"
+    return (f"close {snap['close_date']} at {snap['last_close']:,.2f}; {len(snap['signals'])} signals, "
+            f"{risk_flags} risk flag(s), family votes: {votes}; derivatives signals: {derivs}; "
+            f"open positions: {len(snap['positions'])}")
+
+
+# ---- talking to the dashboard ------------------------------------------------------------------------
+
+def dashboard_base(base: str) -> str:
+    """Normalise a dashboard address. The token travels in a header, so plain http is refused off localhost."""
     parsed = urlparse(base if "//" in base else f"https://{base}")
     if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in LOCAL_HOSTS):
         raise DataError(f"refusing to send a token over {parsed.scheme}://: use https (http is allowed only for localhost)")
     if not parsed.hostname:
         raise DataError(f"not a usable dashboard URL: {base!r}")
     path = parsed.path.rstrip("/")
-    if not path.endswith("/api/ingest"):
-        path += "/api/ingest"
+    if path.endswith("/api/ingest"):
+        path = path[: -len("/api/ingest")]
     return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def ingest_endpoint(base: str) -> str:
+    return dashboard_base(base) + "/api/ingest"
+
+
+def state_endpoint(base: str, name: str) -> str:
+    if name not in STATE_NAMES:
+        raise ValueError(f"state name must be one of {STATE_NAMES}")
+    return dashboard_base(base) + f"/api/state?name={name}"
+
+
+def _auth(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
 
 
 def publish(endpoint: str, token: str, snap: dict) -> None:
     """POST the snapshot. Errors name the status and a body excerpt, never the token."""
     try:
-        response = requests.post(
-            endpoint, json=snap, headers={"Authorization": f"Bearer {token}"}, timeout=20,
-        )
+        response = requests.post(endpoint, json=snap, headers=_auth(token), timeout=20)
     except requests.RequestException as exc:
         raise DataError(f"could not reach {endpoint}: {exc.__class__.__name__}") from exc
     if not response.ok:
         raise DataError(f"dashboard refused the snapshot ({response.status_code}): {response.text[:200]!r}")
+
+
+def get_state(base: str, token: str, name: str) -> str | None:
+    """The stored ``journal`` or ``derivs`` text, or None if nothing has been stored yet."""
+    url = state_endpoint(base, name)
+    try:
+        response = requests.get(url, headers=_auth(token), timeout=20)
+    except requests.RequestException as exc:
+        raise DataError(f"could not reach {url}: {exc.__class__.__name__}") from exc
+    if response.status_code == 404:
+        return None
+    if not response.ok:
+        raise DataError(f"dashboard refused to return {name} ({response.status_code}): {response.text[:200]!r}")
+    try:
+        content = response.json()["content"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise DataError(f"unexpected {name} payload from the dashboard") from exc
+    if not isinstance(content, str):
+        raise DataError(f"unexpected {name} payload from the dashboard")
+    return content
+
+
+def put_state(base: str, token: str, name: str, content: str) -> None:
+    url = state_endpoint(base, name)
+    try:
+        response = requests.put(url, json={"content": content}, headers=_auth(token), timeout=20)
+    except requests.RequestException as exc:
+        raise DataError(f"could not reach {url}: {exc.__class__.__name__}") from exc
+    if not response.ok:
+        raise DataError(f"dashboard refused to store {name} ({response.status_code}): {response.text[:200]!r}")
+
+
+def tail_csv(text: str, rows: int) -> str:
+    """Header plus the last ``rows`` lines, so the stored history cannot grow without bound."""
+    lines = text.strip().splitlines()
+    if len(lines) <= rows + 1:
+        return "\n".join(lines) + "\n"
+    return "\n".join([lines[0], *lines[-rows:]]) + "\n"

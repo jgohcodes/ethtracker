@@ -72,7 +72,8 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
 .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding-block: 14px; }
 .bar__title { display: flex; align-items: baseline; gap: 14px; min-width: 0; }
 .bar h1 { font-size: 18px; font-weight: 650; }
-.bar__price { font-size: 18px; font-weight: 600; }
+.bar__price { font-size: 18px; font-weight: 600; display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.bar__basis { font-size: 13px; font-weight: 400; color: var(--ink-2); }
 .bar__meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .btn {

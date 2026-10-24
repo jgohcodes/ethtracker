@@ -25,7 +25,7 @@ State lives in `~/.ethtracker` (override with `ETHTRACKER_HOME`): `config.toml` 
 | `advise` | Per open position: a recommended action (HOLD, TIGHTEN, TAKE_PARTIAL, EXIT), the bull case, the bear case and why the rule fired. **Exit code 1 on EXIT or TAKE_PARTIAL** |
 | `record` | Polls Deribit's public ticker and appends open interest and funding to a local history, which is what makes the open-interest signals possible |
 | `signals-study` | Tests the candle-derived risk flags against history: what followed days with 0, 1, 2+ flags |
-| `publish` / `dashboard-json` | `publish` computes the dashboard snapshot and sends it to your Vercel dashboard (token from `ETHTRACKER_INGEST_TOKEN`, URL from `--url` or `ETHTRACKER_DASHBOARD_URL`); `dashboard-json` prints what it would send. See [Dashboard](#dashboard) |
+| `publish` / `cloud-run` / `dashboard-json` | `publish` sends the dashboard snapshot from your machine and pushes your journal (run it after each trade); `cloud-run` is the daily job GitHub Actions runs; `dashboard-json` prints what would be sent. See [Dashboard](#dashboard) |
 | `watch` | Polls the price; fires once on level crossings (`--above`, `--below`) and on position and whole-book flags. With open positions it recomputes each recommended action every poll and announces only when one changes. `--record` also logs derivatives data; `--once` for cron |
 | `equity`, `history` | Show/set equity; closed trades with R-multiples |
 
@@ -125,42 +125,53 @@ What to trust:
 
 ## Dashboard
 
-A read-only page with your positions (each with its action, bull case and bear case), account and stress tiles, the signals, a price ladder and an embedded TradingView chart. Your machine computes everything and publishes a JSON snapshot; the Vercel app only stores and displays it, so it needs no data libraries and never holds an exchange key.
+A private page on Vercel with your positions (each with its action, bull case and bear case), account and stress tiles, the signals, a price ladder and a TradingView daily chart. It runs on real data, refreshed once a day just after the 00:00 UTC daily close, which matches a 1D strategy: signals are computed on **completed daily candles only**, so an unfinished day never repaints them. Positions are marked at the spot price when the job runs.
 
 ```
-your machine                                    Vercel (web/)
-ethtracker publish ──POST /api/ingest────────►  api/ingest.js ──► Upstash Redis
- (computes signals, advice, stress)  INGEST_TOKEN                      │
-browser ◄─GET /api/snapshot  DASHBOARD_TOKEN──  api/snapshot.js ◄──────┘
-        ◄─ public/ (static page + TradingView widget)
+GitHub Actions, daily at 00:17 UTC            Vercel (web/)                        your browser
+  ethtracker cloud-run                          api/ingest  ──► Upstash Redis ◄──  api/snapshot ◄── page + TradingView
+   ├ pulls your journal + OI history  ◄──────── api/state   ◄─┘   (snapshot, journal,     (DASHBOARD_TOKEN)
+   ├ Coinbase daily candles, Deribit OI/funding                      OI/funding history)
+   └ computes, publishes ──INGEST_TOKEN──────► api/ingest
+your machine
+  ethtracker open/close/equity, then `ethtracker publish --once` ──► snapshot + journal
 ```
 
-**Deploy**
+Vercel only stores and displays; the maths runs in the job, which never holds an exchange key. Your journal and the open-interest history live in your Redis, never in this (public) repository.
 
-1. In Vercel, import this repository and set the project's **Root Directory** to `web`. The framework preset is "Other"; `web/vercel.json` sets the output directory to `public`.
-2. Add storage: Marketplace, **Upstash Redis**, connected to the project. Check Settings, Environment Variables afterwards: the integration sets either `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` or the older `KV_REST_API_URL` / `KV_REST_API_TOKEN`, and the API accepts either pair. Check Upstash's current free-plan limits.
-3. Add two environment variables with different random values (`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`): `DASHBOARD_TOKEN`, which the browser uses to read, and `INGEST_TOKEN`, which only your machine uses to write. Deploy.
-4. On your machine:
+**Set up (about ten minutes)**
+
+1. **Vercel:** import this repository, set **Root Directory** to `web` (framework preset "Other"; `web/vercel.json` serves `public/`).
+2. **Storage:** in the project, Storage (Marketplace), add **Upstash Redis** and connect it. It sets either `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` or `KV_REST_API_URL` / `KV_REST_API_TOKEN`; the API accepts either.
+3. **Tokens:** add two environment variables with different random values (`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`): `DASHBOARD_TOKEN` (the browser reads with it) and `INGEST_TOKEN` (the job and your machine write with it). Redeploy so they take effect.
+4. **GitHub:** repository Settings, Secrets and variables, Actions: add `ETHTRACKER_DASHBOARD_URL` (your `https://….vercel.app` address) and `ETHTRACKER_INGEST_TOKEN` (the same `INGEST_TOKEN`).
+5. **First run:** Actions tab, "Daily dashboard", Run workflow. After that it runs every day at 00:17 UTC (GitHub may start scheduled jobs late, and pauses schedules in public repositories after 60 days without commits).
+6. **Your positions:** on your machine, record trades as usual (`ethtracker equity`, `open`, `close`), then run
 
    ```
    export ETHTRACKER_DASHBOARD_URL=https://your-app.vercel.app
    export ETHTRACKER_INGEST_TOKEN=<the INGEST_TOKEN>
-   ethtracker publish --record        # every 60s; --once for a single push (cron)
+   ethtracker publish --once
    ```
-5. Open the site and paste the `DASHBOARD_TOKEN`. It is kept in that browser's local storage; "Sign out" clears it.
+   This updates the page immediately and pushes your journal, so every daily run marks the same positions. Run it after every trade.
+7. Open the site and paste the `DASHBOARD_TOKEN`.
 
-**How it behaves.** The page refetches every 30 seconds. A snapshot older than 3 minutes shows a "Delayed" banner and older than 10 minutes a "Stale" banner, judged on the server's receive time, which a client cannot forge. If `publish` stops, the page says so instead of showing a calm HOLD. Snapshots expire after a week.
+Without the GitHub secrets the job still runs as a **dry run**: live data, computed, nothing published. That is a quick check that the data sources work from GitHub's runners. "Run workflow" with *study* ticked also prints `signals-study` on the full daily history.
+
+**Freshness.** The page judges age against the cadence the snapshot declares: a daily snapshot is "Updated" for 30 hours, "Late" after that and "Stale" after 54, with a banner saying where to look. The time is the server's receive time, which a client cannot forge.
+
+**Derivatives history.** Deribit's public API gives only today's open interest and funding, so each daily run appends one row to the history kept in Redis: funding signals work from the first run, the 24h open-interest change from the second, and the open-interest percentile after 30 days. There is no free liquidation feed, so liquidation signals stay absent unless you supply one with `--derivs-csv` on your machine.
 
 **Security.**
 
-- The page itself is public; all data sits behind the token. On Vercel's Hobby plan the production domain stays public (Vercel Authentication covers only previews there), so the token is what protects you. Treat `DASHBOARD_TOKEN` like a password; rotate by changing the variable and redeploying.
-- The snapshot contains your equity and positions and lives in your Upstash database. It never contains exchange keys, and the read token cannot overwrite it.
-- `publish` refuses plain `http://` URLs (except localhost) because the token travels in a header, and reads its token from the environment only.
-- Everything shown is inserted as text, never markup. No Content-Security-Policy is set: a correct one needs testing in a browser against TradingView's domains.
+- The page is public; all data sits behind tokens. On Vercel's Hobby plan the production domain stays public (Vercel Authentication covers only previews there), so `DASHBOARD_TOKEN` is the lock. Treat it like a password; rotate by changing the variable and redeploying.
+- The browser's token can read only the snapshot. It cannot write, and it cannot read the raw journal (`/api/state` takes the write token).
+- The job's logs are public because the repository is: `cloud-run` prints market facts and counts only, never equity, sizes or positions, and GitHub masks the secrets.
+- `publish` and `cloud-run` refuse plain `http://` (except localhost) and read tokens from the environment only. The page inserts everything as text, never markup. No Content-Security-Policy is set: a correct one needs testing in a browser against TradingView's domains.
 
-**The chart** is TradingView's free embedded widget, defaulting to `COINBASE:ETHUSD` (the same spot data the signals use). Use `?symbol=EXCHANGE:SYMBOL` to change it; confirm the exact symbol of your perpetual on TradingView. The widget cannot draw your entries, stops or the computed levels, so the price ladder lists them in price order beside the mark.
+**The chart** is TradingView's free embedded widget on the daily interval, defaulting to `COINBASE:ETHUSD` (the same spot data the signals use). Use `?symbol=EXCHANGE:SYMBOL` to change it. The widget cannot draw your entries, stops or the computed levels, so the price ladder lists them in price order beside the mark.
 
-**Tested and not tested.** The API handlers are tested against a local HTTP server with an in-memory Redis (`cd web && npm install && npm test`), the snapshot builder and `publish` in the Python suite, and the page in headless Chromium against a local stand-in, end to end from the real `ethtracker publish`. It has not been deployed to Vercel, run against a real Upstash database, or loaded with the live TradingView widget (the build environment blocks outside hosts).
+**What is and is not verified.** The API handlers are tested against a local HTTP server with an in-memory Redis (`cd web && npm install && npm test`); `publish`, `cloud-run` and the snapshot in the Python suite; the page in headless Chromium, end to end from the real commands. The job's data path is exercised on GitHub's runners by the workflow itself. The Vercel deployment, Upstash and the live TradingView widget are exercised only once you deploy.
 
 ## Testing a pullback rule
 

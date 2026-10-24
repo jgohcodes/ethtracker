@@ -5,6 +5,7 @@ import pytest
 
 from ethtracker import config, data, derivs, indicators, snapshot
 from ethtracker.cli import main
+from tests.fakes import FakeDashboard
 
 INSTRUMENT = config.Config().derivs_instrument  # the linear USDC perpetual
 
@@ -359,44 +360,37 @@ def test_dashboard_json_prints_to_stdout_without_an_out_path(capsys, funded, can
     assert code == 0 and json.loads(out)["positions"] == []
 
 
-class PostRecorder:
-    def __init__(self, fail_after=None):
-        self.calls, self.fail_after = [], fail_after
-
-    def __call__(self, url, json=None, headers=None, timeout=None):
-        if self.fail_after is not None and len(self.calls) >= self.fail_after:
-            import requests
-            raise requests.ConnectionError("down")
-        self.calls.append({"url": url, "body": json, "headers": headers})
-
-        class Ok:
-            ok, status_code, text = True, 200, "ok"
-
-        return Ok()
-
-
-def test_publish_once_posts_the_snapshot_and_never_echoes_the_token(capsys, monkeypatch, funded, candles_csv):
+def test_publish_once_posts_the_snapshot_pushes_the_journal_and_never_echoes_the_token(capsys, monkeypatch, funded, candles_csv):
     open_long(capsys, 285)
     monkeypatch.setenv("ETHTRACKER_INGEST_TOKEN", "s3cret-ingest-token")
-    post = PostRecorder()
-    monkeypatch.setattr(snapshot.requests, "post", post)
+    dash = FakeDashboard(token="s3cret-ingest-token").install(monkeypatch)
     code = main(["--provider", "csv", "--csv", str(candles_csv), "publish", "--url", "http://localhost:3000", "--once"])
     captured = capsys.readouterr()
     assert code == 0 and "published ETHUSD" in captured.out and "#1 " in captured.out
     assert "s3cret-ingest-token" not in captured.out + captured.err
-    (call,) = post.calls
-    assert call["url"] == "http://localhost:3000/api/ingest"
-    assert call["headers"] == {"Authorization": "Bearer s3cret-ingest-token"}
-    assert call["body"]["positions"][0]["id"] == 1
+    (snap,) = dash.snapshots
+    assert snap["positions"][0]["id"] == 1 and snap["basis"] == "close"
+    assert snap["publisher"] == "local" and snap["refresh_seconds"] == 86_400  # after --once the daily job is the cadence
+    assert ("POST", "http://localhost:3000/api/ingest") in dash.calls
+    journal = json.loads(dash.state["journal"])
+    assert journal == json.loads((config.home() / "state.json").read_text())
+
+
+def test_publish_uses_the_derivatives_history_kept_by_the_dashboard(capsys, monkeypatch, funded, candles_csv):
+    monkeypatch.setenv("ETHTRACKER_INGEST_TOKEN", "t")
+    history = "time,open_interest,funding_8h\n2026-10-20T00:20:00+00:00,100,0.0007\n"
+    dash = FakeDashboard(state={"derivs": history}).install(monkeypatch)
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "publish", "--url", "https://d.example", "--once"]) == 0
+    funding = next(s for s in dash.snapshots[0]["signals"] if s["name"] == "funding")
+    assert "0.070%" in funding["headline"]
 
 
 def test_publish_reads_the_url_from_the_environment(capsys, monkeypatch, funded, candles_csv):
     monkeypatch.setenv("ETHTRACKER_INGEST_TOKEN", "t")
     monkeypatch.setenv("ETHTRACKER_DASHBOARD_URL", "https://dash.example.app")
-    post = PostRecorder()
-    monkeypatch.setattr(snapshot.requests, "post", post)
+    dash = FakeDashboard().install(monkeypatch)
     assert main(["--provider", "csv", "--csv", str(candles_csv), "publish", "--once"]) == 0
-    assert post.calls[0]["url"] == "https://dash.example.app/api/ingest"
+    assert ("POST", "https://dash.example.app/api/ingest") in dash.calls
 
 
 def test_publish_needs_a_url_and_a_token_and_refuses_plain_http(capsys, monkeypatch, funded, candles_csv):
@@ -412,12 +406,11 @@ def test_publish_needs_a_url_and_a_token_and_refuses_plain_http(capsys, monkeypa
 def test_publish_first_failure_is_fatal_but_later_ones_are_warnings(capsys, monkeypatch, funded, candles_csv):
     monkeypatch.setenv("ETHTRACKER_INGEST_TOKEN", "t")
     base = ["--provider", "csv", "--csv", str(candles_csv), "publish", "--url", "https://d.example", "--interval", "1"]
-    monkeypatch.setattr(snapshot.requests, "post", PostRecorder(fail_after=0))
+    FakeDashboard(unreachable=True).install(monkeypatch)
     assert main([*base, "--once"]) == 2
     assert "could not reach" in capsys.readouterr().err
 
-    post = PostRecorder(fail_after=1)  # the first publish works, the second cannot reach the dashboard
-    monkeypatch.setattr(snapshot.requests, "post", post)
+    dash = FakeDashboard(fail_posts_after=1).install(monkeypatch)  # the first publish works, the second cannot
     sleeps = []
 
     def sleeper(seconds):
@@ -429,6 +422,122 @@ def test_publish_first_failure_is_fatal_but_later_ones_are_warnings(capsys, monk
     assert main(base) == 0
     captured = capsys.readouterr()
     assert captured.out.count("published ETHUSD") == 1 and "not published this round" in captured.err
+    assert len(dash.snapshots) == 1
+
+
+def cloud_journal(tmp_path, equity=123_456.0, entry=285.0) -> str:
+    from ethtracker.journal import Journal
+
+    j = Journal(tmp_path / "cloud" / "state.json")
+    j.set_equity(equity)
+    j.open(side="long", entry=entry, qty=7.0, leverage=5.0, stop=entry * 0.96, target=None, mmr=0.005,
+           initial_risk_usd=100.0, note="private note")
+    j.save()
+    return (tmp_path / "cloud" / "state.json").read_text()
+
+
+def fake_deribit(monkeypatch, *, fail=False):
+    if fail:
+        def boom(instrument):
+            raise data.DataError("GET https://www.deribit.com/api/v2/public/ticker failed: 451")
+        monkeypatch.setattr(derivs, "fetch_deribit_snapshot", boom)
+        return
+    row = derivs.parse_deribit_ticker({"result": {"open_interest": 1200.0, "funding_8h": 0.0006}})
+    row["time"] = "2026-10-24T00:20:00+00:00"  # the day after the stored history's last row
+    monkeypatch.setattr(derivs, "fetch_deribit_snapshot", lambda instrument: row)
+
+
+def cloud_env(monkeypatch, url="https://dash.example"):
+    monkeypatch.setenv("ETHTRACKER_DASHBOARD_URL", url)
+    monkeypatch.setenv("ETHTRACKER_INGEST_TOKEN", "t")
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+
+def test_cloud_run_publishes_from_the_stored_journal_and_grows_the_derivatives_history(capsys, monkeypatch, candles_csv, tmp_path):
+    cloud_env(monkeypatch)
+    history = "time,open_interest,funding_8h,current_funding,mark_price,index_price\n2026-10-23T00:20:00+00:00,1000,0.0001,,,\n"
+    dash = FakeDashboard(state={"journal": cloud_journal(tmp_path), "derivs": history}).install(monkeypatch)
+    fake_deribit(monkeypatch)
+    code = main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"])
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    (snap,) = dash.snapshots
+    assert len(snap["positions"]) == 1 and snap["equity"]["wallet"] == 123_456.0
+    assert snap["basis"] == "close" and snap["refresh_seconds"] == 86_400 and snap["publisher"] == "cloud-run"
+    assert any(s["name"] == "funding" and "0.060%" in s["headline"] for s in snap["signals"])
+    rows = dash.state["derivs"].strip().splitlines()
+    assert len(rows) == 3 and rows[0].startswith("time,")  # header, yesterday's row, today's row
+    assert "open positions: 1" in captured.out and "published the snapshot and the derivatives history" in captured.out
+    assert not (config.home() / "state.json").exists()  # the local journal is never touched
+
+
+def test_cloud_run_output_is_safe_for_public_logs(capsys, monkeypatch, candles_csv, tmp_path):
+    cloud_env(monkeypatch)
+    FakeDashboard(state={"journal": cloud_journal(tmp_path)}).install(monkeypatch)
+    fake_deribit(monkeypatch, fail=True)
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"]) == 0
+    captured = capsys.readouterr()
+    logs = captured.out + captured.err
+    for secret in ("123,456", "123456", "285", "private note", "7.0000", "dash.example/api/state", " t\n"):
+        assert secret not in logs, secret
+
+
+def test_cloud_run_marks_its_snapshots_as_from_github_actions_there(capsys, monkeypatch, candles_csv):
+    cloud_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    dash = FakeDashboard().install(monkeypatch)
+    fake_deribit(monkeypatch)
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"]) == 0
+    assert dash.snapshots[0]["publisher"] == "github-actions"
+
+
+def test_cloud_run_with_no_journal_yet_shows_the_market_only(capsys, monkeypatch, candles_csv):
+    cloud_env(monkeypatch)
+    dash = FakeDashboard().install(monkeypatch)
+    fake_deribit(monkeypatch)
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"]) == 0
+    snap = dash.snapshots[0]
+    assert snap["positions"] == [] and snap["equity"] is None and snap["signals"]
+    assert dash.state["derivs"].count("\n") == 2  # header plus the first recorded day
+
+
+def test_cloud_run_survives_a_failed_derivatives_fetch_and_keeps_the_old_history(capsys, monkeypatch, candles_csv):
+    cloud_env(monkeypatch)
+    dash = FakeDashboard(state={"derivs": "time,open_interest,funding_8h\n2026-10-23T00:20:00+00:00,1000,0.0001\n"}).install(monkeypatch)
+    fake_deribit(monkeypatch, fail=True)
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"]) == 0
+    captured = capsys.readouterr()
+    assert "derivatives snapshot unavailable" in captured.err and "published the snapshot" in captured.out
+    assert ("PUT", "https://dash.example/api/state?name=derivs") not in dash.calls  # nothing new to store
+    assert dash.snapshots
+
+
+def test_cloud_run_rejects_a_corrupt_stored_journal(capsys, monkeypatch, candles_csv):
+    cloud_env(monkeypatch)
+    FakeDashboard(state={"journal": "{not json"}).install(monkeypatch)
+    fake_deribit(monkeypatch)
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"]) == 2
+    assert "journal stored on the dashboard is not valid" in capsys.readouterr().err
+
+
+def test_cloud_run_needs_credentials_unless_it_is_a_dry_run(capsys, monkeypatch, candles_csv, tmp_path):
+    monkeypatch.delenv("ETHTRACKER_DASHBOARD_URL", raising=False)
+    monkeypatch.delenv("ETHTRACKER_INGEST_TOKEN", raising=False)
+    dash = FakeDashboard().install(monkeypatch)
+    fake_deribit(monkeypatch)
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"]) == 2
+    out = tmp_path / "snap.json"
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run", "--dry-run", "--out", str(out)]) == 0
+    assert "dry run" in capsys.readouterr().out
+    assert dash.calls == [] and json.loads(out.read_text())["basis"] == "close"
+
+
+def test_cloud_run_fails_loudly_when_publishing_fails(capsys, monkeypatch, candles_csv):
+    cloud_env(monkeypatch)
+    FakeDashboard(fail_posts_after=0).install(monkeypatch)
+    fake_deribit(monkeypatch)
+    assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"]) == 2
+    assert "could not reach" in capsys.readouterr().err
 
 
 def test_study_from_csv_prints_trades_summary_and_caveats(capsys, candles_csv):

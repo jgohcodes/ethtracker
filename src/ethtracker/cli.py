@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -339,9 +340,38 @@ def _record_derivs(ctx: Ctx) -> None:
         print(f"warning: could not record derivatives data ({exc})", file=sys.stderr)
 
 
-def _snapshot(args, ctx: Ctx, provider: Provider, price: float, df: pd.DataFrame) -> dict:
+DERIVS_HISTORY_ROWS = 2000  # one row a day from the daily job: years of history, bounded
+
+
+def _snapshot(args, ctx: Ctx, provider: Provider, price: float, df: pd.DataFrame, derivs_df=None, **kwargs) -> dict:
     anchor = pd.Timestamp(args.anchor, tz="UTC") if getattr(args, "anchor", None) else None
-    return snapshot.build(ctx.cfg, ctx.journal, df, price, _derivs(args, ctx), anchor=anchor, source=provider.name)
+    derivs_df = _derivs(args, ctx) if derivs_df is None else derivs_df
+    return snapshot.build(ctx.cfg, ctx.journal, df, price, derivs_df, anchor=anchor, source=provider.name,
+                          basis=getattr(args, "basis", "close"), **kwargs)
+
+
+def _dashboard_credentials(args) -> tuple[str, str]:
+    base = args.url or os.environ.get("ETHTRACKER_DASHBOARD_URL")
+    token = os.environ.get("ETHTRACKER_INGEST_TOKEN")
+    if not base:
+        raise CliError("give --url, or set ETHTRACKER_DASHBOARD_URL to your dashboard's address")
+    if not token:
+        raise CliError("set ETHTRACKER_INGEST_TOKEN to the dashboard's INGEST_TOKEN (it is read from the environment only)")
+    return snapshot.dashboard_base(base), token
+
+
+def _derivs_from_text(text: str | None) -> pd.DataFrame | None:
+    """Derivatives history held by the dashboard, parsed with the same loader as a local file."""
+    if not text:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "derivs.csv"
+        path.write_text(text)
+        try:
+            return derivs.load_csv(path)
+        except DataError as exc:
+            print(f"warning: ignoring unreadable derivatives history ({exc})", file=sys.stderr)
+            return None
 
 
 def cmd_dashboard_json(args, ctx: Ctx) -> int:
@@ -359,14 +389,11 @@ def cmd_dashboard_json(args, ctx: Ctx) -> int:
 
 
 def cmd_publish(args, ctx: Ctx) -> int:
-    base = args.url or os.environ.get("ETHTRACKER_DASHBOARD_URL")
-    token = os.environ.get("ETHTRACKER_INGEST_TOKEN")
-    if not base:
-        raise CliError("give --url, or set ETHTRACKER_DASHBOARD_URL to your dashboard's address")
-    if not token:
-        raise CliError("set ETHTRACKER_INGEST_TOKEN to the dashboard's INGEST_TOKEN (it is read from the environment only)")
+    """Publish from this machine and push the journal, so the daily job marks the same positions."""
+    base, token = _dashboard_credentials(args)
     endpoint = snapshot.ingest_endpoint(base)
     provider = _provider(args, ctx)
+    refresh = snapshot.DAY_SECONDS if args.once else int(args.interval)  # after --once, the daily job is the cadence
     df, candles_at, first = None, float("-inf"), True
     try:
         while True:
@@ -374,10 +401,11 @@ def cmd_publish(args, ctx: Ctx) -> int:
                 price = provider.spot()
                 if df is None or time.monotonic() - candles_at > CANDLE_REFRESH_SECONDS:
                     df, candles_at = provider.candles(args.days), time.monotonic()
-                if args.record:
-                    _record_derivs(ctx)
-                snap = _snapshot(args, ctx, provider, price, df)
+                history = None if args.derivs_csv else _derivs_from_text(snapshot.get_state(base, token, "derivs"))
+                snap = _snapshot(args, ctx, provider, price, df, history, refresh_seconds=refresh, publisher="local")
                 snapshot.publish(endpoint, token, snap)
+                if ctx.journal.path.exists():
+                    snapshot.put_state(base, token, "journal", ctx.journal.path.read_text())
                 actions = ", ".join(f"#{p['id']} {p['action']}" for p in snap["positions"]) or "no open positions"
                 print(f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}Z  published ETHUSD {usd(price)}  ({actions})")
             except DataError as exc:
@@ -391,6 +419,53 @@ def cmd_publish(args, ctx: Ctx) -> int:
     except KeyboardInterrupt:
         print()
         return 0
+
+
+def cmd_cloud_run(args, ctx: Ctx) -> int:
+    """The daily job. Pulls your journal and the derivatives history from the dashboard, records today's
+    open interest and funding, computes the snapshot on completed daily candles and publishes it.
+    Its output is safe for public CI logs: market facts and counts only."""
+    base = token = None
+    if not args.dry_run:
+        base, token = _dashboard_credentials(args)
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        journal_text = snapshot.get_state(base, token, "journal") if base else None
+        if journal_text is not None:
+            (work / "state.json").write_text(journal_text)
+        try:
+            journal = Journal(work / "state.json")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CliError("the journal stored on the dashboard is not valid: run `ethtracker publish --once` to replace it") from exc
+
+        history_path = work / "derivs.csv"
+        history = snapshot.get_state(base, token, "derivs") if base else None
+        if history:
+            history_path.write_text(history)
+        recorded = False
+        try:
+            recorded = derivs.append_snapshot(history_path, derivs.fetch_deribit_snapshot(ctx.cfg.derivs_instrument))
+        except DataError as exc:
+            print(f"warning: derivatives snapshot unavailable ({exc})", file=sys.stderr)
+        derivs_df = _derivs_from_text(history_path.read_text()) if history_path.exists() else None
+
+        provider = _provider(args, ctx)
+        price, df = provider.spot(), provider.candles(args.days)
+        publisher = "github-actions" if os.environ.get("GITHUB_ACTIONS") == "true" else "cloud-run"
+        snap = snapshot.build(ctx.cfg, journal, df, price, derivs_df, source=provider.name, basis="close",
+                              refresh_seconds=snapshot.DAY_SECONDS, publisher=publisher)
+        print(snapshot.public_summary(snap))
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(json.dumps(snap, indent=2, allow_nan=False) + "\n")
+        if args.dry_run:
+            print("dry run: computed from live data, nothing published")
+            return 0
+        snapshot.publish(snapshot.ingest_endpoint(base), token, snap)
+        if recorded:
+            snapshot.put_state(base, token, "derivs", snapshot.tail_csv(history_path.read_text(), DERIVS_HISTORY_ROWS))
+        print("published the snapshot" + (" and the derivatives history" if recorded else ""))
+    return 0
 
 
 def cmd_signals_study(args, ctx: Ctx) -> int:
@@ -817,14 +892,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--days", type=int, default=500)
     sp.add_argument("--anchor", help="anchor date (YYYY-MM-DD) for the anchored VWAP")
     sp.add_argument("--price", type=float, help="use this price instead of fetching spot")
+    sp.add_argument("--basis", choices=snapshot.BASES, default="close", help="close: signals on completed daily candles (default); live: include today's")
 
-    sp = add("publish", cmd_publish, "compute the snapshot and send it to your Vercel dashboard (token from ETHTRACKER_INGEST_TOKEN)")
+    sp = add("publish", cmd_publish, "compute the snapshot, send it to your Vercel dashboard and push your journal (token from ETHTRACKER_INGEST_TOKEN)")
     sp.add_argument("--url", help="dashboard address (default: $ETHTRACKER_DASHBOARD_URL)")
     sp.add_argument("--interval", type=float, default=60, help="seconds between publishes")
-    sp.add_argument("--once", action="store_true", help="publish once and exit")
-    sp.add_argument("--record", action="store_true", help="also append a Deribit open-interest/funding snapshot each round")
+    sp.add_argument("--once", action="store_true", help="publish once and exit (run this after you open or close a trade)")
+    sp.add_argument("--basis", choices=snapshot.BASES, default="close", help="close: signals on completed daily candles (default); live: include today's")
     sp.add_argument("--days", type=int, default=500)
     sp.add_argument("--anchor", help="anchor date (YYYY-MM-DD) for the anchored VWAP")
+
+    sp = add("cloud-run", cmd_cloud_run, "the daily job: pull your journal and derivatives history from the dashboard, add today's data, publish")
+    sp.add_argument("--url", help="dashboard address (default: $ETHTRACKER_DASHBOARD_URL)")
+    sp.add_argument("--dry-run", action="store_true", help="fetch live data and compute, but publish nothing (needs no dashboard)")
+    sp.add_argument("--out", type=Path, help="also write the snapshot JSON here")
+    sp.add_argument("--days", type=int, default=500)
 
     sp = add("signals-study", cmd_signals_study, "how the technical risk-flag count related to later drawdowns and rallies in history")
     sp.add_argument("--horizon", type=int, help="days ahead (default: config max_holding_days)")

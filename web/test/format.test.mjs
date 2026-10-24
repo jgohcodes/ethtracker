@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
-  priceLadder, isValidSymbol, FRESH_SECONDS, STALE_SECONDS, ACTIONS,
+  priceLadder, isValidSymbol, FRESH_SECONDS, STALE_SECONDS, ACTIONS, freshnessThresholds, describeInterval,
 } from "../public/format.mjs";
 
 test("money formatting groups thousands, signs deltas and survives missing values", () => {
@@ -34,6 +34,27 @@ test("percentages take fractions", () => {
   assert.equal(signedPct(0.1234), "+12.3%");
   assert.equal(signedPct(-0.0456), "-4.6%");
   assert.equal(signedPct(0), "+0.0%");
+});
+
+test("freshness scales with the declared cadence", () => {
+  const hour = 3600;
+  assert.equal(freshness(20 * hour, 86400), "fresh");
+  assert.equal(freshness(29 * hour, 86400), "fresh");
+  assert.equal(freshness(31 * hour, 86400), "delayed");
+  assert.equal(freshness(53 * hour, 86400), "delayed");
+  assert.equal(freshness(55 * hour, 86400), "stale");
+  assert.deepEqual(freshnessThresholds(86400), { fresh: 108000, stale: 194400 });
+  assert.deepEqual(freshnessThresholds(60), { fresh: FRESH_SECONDS, stale: STALE_SECONDS });
+  for (const junk of [0, -5, null, undefined, NaN]) assert.deepEqual(freshnessThresholds(junk), freshnessThresholds(60));
+});
+
+test("describeInterval reads naturally", () => {
+  assert.equal(describeInterval(86400), "daily");
+  assert.equal(describeInterval(172800), "every 2 days");
+  assert.equal(describeInterval(14400), "every 4h");
+  assert.equal(describeInterval(60), "every 1 min");
+  assert.equal(describeInterval(30), "every 30s");
+  assert.equal(describeInterval(null), "at an unknown interval");
 });
 
 test("freshness judges the age of the last snapshot", () => {

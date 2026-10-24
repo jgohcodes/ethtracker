@@ -1,0 +1,55 @@
+name: Daily dashboard
+
+# Refreshes the Vercel dashboard once a day, just after the 00:00 UTC daily candle closes, from live
+# Coinbase daily candles and Deribit open interest and funding. Run it by hand from the Actions tab too.
+#
+# Needs two repository secrets: ETHTRACKER_DASHBOARD_URL and ETHTRACKER_INGEST_TOKEN. Without them it
+# does a dry run: live data, computed, nothing published.
+#
+# This repository is public, so these logs are public: cloud-run prints market facts and counts only,
+# never equity, sizes or positions.
+
+on:
+  schedule:
+    - cron: "17 0 * * *"
+  workflow_dispatch:
+    inputs:
+      study:
+        description: "Also run signals-study on the full daily history"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-dashboard
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ETHTRACKER_HOME: ${{ github.workspace }}/.ethtracker-run
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install --quiet .
+      - name: Compute and publish
+        env:
+          ETHTRACKER_DASHBOARD_URL: ${{ secrets.ETHTRACKER_DASHBOARD_URL }}
+          ETHTRACKER_INGEST_TOKEN: ${{ secrets.ETHTRACKER_INGEST_TOKEN }}
+        run: |
+          if [ -n "$ETHTRACKER_DASHBOARD_URL" ] && [ -n "$ETHTRACKER_INGEST_TOKEN" ]; then
+            ethtracker cloud-run
+          else
+            echo "::notice title=Dry run::Set the ETHTRACKER_DASHBOARD_URL and ETHTRACKER_INGEST_TOKEN repository secrets to publish. This run fetched live data and published nothing."
+            ethtracker cloud-run --dry-run
+          fi
+      - name: Signals study
+        if: ${{ inputs.study }}
+        run: ethtracker signals-study --days 3000
