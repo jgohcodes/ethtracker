@@ -455,6 +455,9 @@ def cmd_cloud_run(args, ctx: Ctx) -> int:
         snap = snapshot.build(ctx.cfg, journal, df, price, derivs_df, source=provider.name, basis="close",
                               refresh_seconds=snapshot.DAY_SECONDS, publisher=publisher)
         print(snapshot.public_summary(snap))
+        if not args.dry_run:
+            print("journal: " + ("pulled from the dashboard" if journal_text is not None
+                                 else "none stored yet, so a market-only snapshot (run `ethtracker publish --once` on your machine)"))
         if args.out:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(json.dumps(snap, indent=2, allow_nan=False) + "\n")

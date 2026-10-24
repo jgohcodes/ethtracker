@@ -53,3 +53,16 @@ jobs:
       - name: Signals study
         if: ${{ inputs.study }}
         run: ethtracker signals-study --days 3000
+      # The entry rule itself: a 20% pullback from the 30-day high, 3x ATR stop, 14-day time stop.
+      # At 10x isolated the liquidation price sits inside that stop; ~2.5x is what the 40% stress rule allows.
+      - name: Pullback backtest
+        if: ${{ inputs.study }}
+        run: |
+          for lev in 10 2.5; do
+            echo "::group::20% pullback, ${lev}x"
+            ethtracker study --days 3000 --trigger 20 --stop-atr 3 --leverage "$lev"
+            echo "::endgroup::"
+          done
+          echo "::group::15% pullback, 2.5x"
+          ethtracker study --days 3000 --trigger 15 --stop-atr 3 --leverage 2.5
+          echo "::endgroup::"

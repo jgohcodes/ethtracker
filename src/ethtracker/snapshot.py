@@ -165,13 +165,13 @@ def build(
 
 
 def public_summary(snap: dict) -> str:
-    """One line safe for public CI logs: market facts and counts, never equity, sizes or positions' details."""
+    """One line safe for public CI logs: market facts and signal counts only. Nothing about the account,
+    not even how many positions are open, because the repository's logs are public."""
     votes = ", ".join(f"{k} {v:+d}" for k, v in snap["votes"].items() if v) or "none"
     risk_flags = sum(1 for s in snap["signals"] if s["risk"])
     derivs = "yes" if any(s["name"] in ("funding", "oi_change", "oi_level") for s in snap["signals"]) else "no"
     return (f"close {snap['close_date']} at {snap['last_close']:,.2f}; {len(snap['signals'])} signals, "
-            f"{risk_flags} risk flag(s), family votes: {votes}; derivatives signals: {derivs}; "
-            f"open positions: {len(snap['positions'])}")
+            f"{risk_flags} risk flag(s), family votes: {votes}; derivatives signals: {derivs}")
 
 
 # ---- talking to the dashboard ------------------------------------------------------------------------

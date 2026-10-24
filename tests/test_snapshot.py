@@ -218,11 +218,11 @@ def test_cadence_and_publisher_are_carried_for_the_page(tmp_path):
     assert daily["refresh_seconds"] == 86_400 and daily["publisher"] == "github-actions"
 
 
-def test_public_summary_has_market_facts_and_counts_but_nothing_about_the_money(tmp_path):
+def test_public_summary_has_market_facts_but_nothing_about_the_account(tmp_path):
     snap = build(tmp_path, equity=123_456.0, entries=(250.0,))
     line = snapshot.public_summary(snap)
-    assert snap["close_date"] in line and "open positions: 1" in line and "signals" in line
-    for secret in ("123,456", "123456", "250.00", "97.6", "swing"):
+    assert snap["close_date"] in line and "signals" in line
+    for secret in ("123,456", "123456", "250.00", "97.6", "swing", "position"):
         assert secret not in line
 
 

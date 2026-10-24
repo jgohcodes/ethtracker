@@ -467,7 +467,8 @@ def test_cloud_run_publishes_from_the_stored_journal_and_grows_the_derivatives_h
     assert any(s["name"] == "funding" and "0.060%" in s["headline"] for s in snap["signals"])
     rows = dash.state["derivs"].strip().splitlines()
     assert len(rows) == 3 and rows[0].startswith("time,")  # header, yesterday's row, today's row
-    assert "open positions: 1" in captured.out and "published the snapshot and the derivatives history" in captured.out
+    assert "journal: pulled from the dashboard" in captured.out
+    assert "published the snapshot and the derivatives history" in captured.out
     assert not (config.home() / "state.json").exists()  # the local journal is never touched
 
 
@@ -478,7 +479,7 @@ def test_cloud_run_output_is_safe_for_public_logs(capsys, monkeypatch, candles_c
     assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"]) == 0
     captured = capsys.readouterr()
     logs = captured.out + captured.err
-    for secret in ("123,456", "123456", "285", "private note", "7.0000", "dash.example/api/state", " t\n"):
+    for secret in ("123,456", "123456", "285", "private note", "7.0000", "dash.example/api/state", " t\n", "position"):
         assert secret not in logs, secret
 
 
@@ -498,6 +499,7 @@ def test_cloud_run_with_no_journal_yet_shows_the_market_only(capsys, monkeypatch
     assert main(["--provider", "csv", "--csv", str(candles_csv), "cloud-run"]) == 0
     snap = dash.snapshots[0]
     assert snap["positions"] == [] and snap["equity"] is None and snap["signals"]
+    assert "journal: none stored yet" in capsys.readouterr().out
     assert dash.state["derivs"].count("\n") == 2  # header plus the first recorded day
 
 
