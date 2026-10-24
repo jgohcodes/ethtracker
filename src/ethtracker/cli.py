@@ -8,14 +8,14 @@ import os
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, config, cycles, derivs, indicators, risk, signals, snapshot, study
+from . import advice, alerts, combo, config, cycles, derivs, indicators, risk, signals, snapshot, study
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -558,6 +558,101 @@ def cmd_cycle_study(args, ctx: Ctx) -> int:
     return 0
 
 
+def _combo_table(title: str, rows: list) -> None:
+    spot = rows[0].multiple
+    print()
+    print(title)
+    print(f"  {'strategy':<49} {'x start':>12} {'vs spot':>8} {'max DD':>7} {'core liquidated':>15} "
+          f"{'swings':>6} {'swing liq':>9} {'swept':>7}")
+    for r in rows:
+        vs = f"{r.multiple / spot:.2f}x" if spot > 0 else "n/a"
+        dead = f"{r.core_liquidated:%Y-%m-%d}" if r.core_liquidated is not None else ""
+        print(f"  {r.name:<49} {r.multiple:>11,.2f}x {vs:>8} {r.max_drawdown:>7.0%} {dead:>15} "
+              f"{r.swing_trades:>6} {r.swing_liquidated:>9} {r.swept:>6.2f}x")
+
+
+def cmd_combo_study(args, ctx: Ctx) -> int:
+    provider = _provider(args, ctx)
+    raw = provider.candles(args.days)
+    full, flashes = cycles.ignore_flash_prints(raw)
+    rules = cycles.Rules.of(full)
+    cfg = ctx.cfg
+    first, last = full.index[0], full.index[-1]
+    cost = cfg.funding_rate_8h * risk.FUNDING_PERIODS_PER_DAY * 365
+    print("Two sleeves: a long-only perp core, plus a small high-leverage swing sleeve whose profits are swept into the core")
+    print(f"Data: {len(full)} daily candles, {first:%Y-%m-%d} to {last:%Y-%m-%d} ({provider.name}). "
+          f"Funding {cfg.funding_rate_8h:.3%}/8h ({cost:.1%} a year on the notional), taker fee {cfg.taker_fee_rate:.2%}, "
+          f"maintenance margin {cfg.maintenance_margin_rate:.1%}.")
+    for day in flashes:
+        print(f"Ignored for liquidations, as a perp's mark price would: the {day:%Y-%m-%d} low of {raw.loc[day, 'low']:,.2f}.")
+
+    phases = cycles.find_phases(full)
+    bulls = [ph for ph in phases if ph.kind == "bull" and ph.from_bottom and ph.complete]
+    periods = [("Whole history", first, last)]
+    if bulls:
+        periods.append((f"Since the {bulls[0].start:%Y-%m-%d} bottom", bulls[0].start, last))
+    periods += [(f"Bull {ph.start:%Y}-{ph.end:%Y}, bottom to top", ph.start, ph.end) for ph in bulls]
+    periods.append(("Last 4 years", last - pd.DateOffset(years=4), last))
+    print()
+    print("The arithmetic of leverage: a position kept at leverage L grows about L(mu - funding) - L^2 sigma^2 / 2 a year")
+    print(f"  {'period':<30} {'volatility':>10} {'spot':>8} {'1.4x':>8} {'2.5x':>8} {'growth-optimal':>15}")
+    for label, start, end in periods:
+        g = combo.growth(full[start:end], label)
+        yearly = lambda x: f"{np.expm1(x):+.0%}"
+        print(f"  {label:<30} {g.vol:>10.0%} {yearly(g.drift):>8} {yearly(g.at(1.4, cost)):>8} {yearly(g.at(2.5, cost)):>8} "
+              f"{g.kelly(cost):>14.2f}x")
+    print("  (compound growth a year; growth-optimal is the leverage that maximises it, and growth turns negative at twice that)")
+
+    windows = []
+    for ph in bulls:
+        rows = combo.run_window(full, ph.start, ph.end, cfg, rules)
+        _combo_table(f"Bull phase {ph.start:%Y-%m-%d} to {ph.end:%Y-%m-%d}, bottom to top (hindsight)", rows)
+        windows.append(rows)
+    if len(windows) > 1:
+        _combo_table(f"The {len(windows)} bull phases back to back", combo.chain(windows))
+    current = phases[-1]
+    if current.kind == "bear" and not current.complete:
+        _combo_table(f"Current bear phase {current.start:%Y-%m-%d} to {current.end:%Y-%m-%d}, started at the top",
+                     combo.run_window(full, current.start, current.end, cfg, rules))
+
+    starts = cycles.deep_starts(full)
+    if starts:
+        groups = cycles.episodes(starts)
+        print()
+        print(f"From every week ETH closed {cycles.DEEP:.0%}+ below its highest close so far, {cycles.HORIZON_YEARS} years forward, "
+              f"no hindsight: {len(starts)} starts in {len(groups)} separate drawdowns. Today: "
+              f"{1 - full['close'].iloc[-1] / full['close'].max():.0%} below the highest close.")
+        print(f"  {'strategy':<49} {'median x':>10} {'beat spot':>9} {'core liq':>8} {'worst':>7}  median vs spot, each drawdown")
+        runner = lambda f, s, e, c, r: combo.run_window(f, s, e, c, r)
+        for r in cycles.rolling(full, cfg, starts, runner=runner):
+            each = "  ".join(f"{v:>5.2f}x" for v in r.median_vs_spot_by_episode)
+            print(f"  {r.name:<49} {r.median_multiple:>9,.2f}x {r.beat_spot:>9.0%} {r.liquidated:>8.0%} {r.worst:>6.2f}x  {each}")
+
+        picks = [c for c in combo.COMBOS if c.name in (
+            "Hold spot, all in", "85% perp 2.5x held + 15% swing 10x", "85% perp 1.4x held + 15% swing 10x", "85% spot + 15% swing 10x")]
+        rates = (0.0, cfg.funding_rate_8h, 3 * cfg.funding_rate_8h)
+        table = {}
+        for rate in rates:
+            cfg_r = replace(cfg, funding_rate_8h=rate)
+            runner = lambda f, s, e, c, r: combo.run_window(f, s, e, c, r, combos=picks)
+            table[rate] = cycles.rolling(full, cfg_r, starts, runner=runner)
+        print()
+        print("Funding sensitivity, same windows: median x start (share of windows beating spot)")
+        print(f"  {'strategy':<49} " + " ".join(f"{f'{rate:.3%}/8h':>16}" for rate in rates))
+        for j, pick in enumerate(picks):
+            cells = " ".join(f"{f'{table[rate][j].median_multiple:,.2f}x ({table[rate][j].beat_spot:.0%})':>16}" for rate in rates)
+            print(f"  {pick.name:<49} {cells}")
+
+    _combo_table(f"Whole history {first:%Y-%m-%d} to {last:%Y-%m-%d}, no hindsight", combo.run_window(full, first, last, cfg, rules))
+    print()
+    print("Sleeves are separate margin pools. Each swing trade posts the whole sleeve; on a winning exit the sleeve's excess over")
+    print("its starting stake is swept into the core (bought at the core's leverage, or as margin only where stated). A wiped-out")
+    print("sleeve is not refilled. 'Held': one perp opened at the start, so leverage falls as price rises and climbs as it falls.")
+    print(f"'Kept': resized at the close whenever leverage drifts {combo.BAND:.0%} from target. Swing rule: the dip-done entry,")
+    print("out at RSI 70 or 30 days. The growth arithmetic assumes the period's drift continues, which is the real unknown.")
+    return 0
+
+
 def cmd_signals_study(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
     df = provider.candles(args.days)
@@ -997,6 +1092,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="fetch live data and compute, but publish nothing (needs no dashboard)")
     sp.add_argument("--out", type=Path, help="also write the snapshot JSON here")
     sp.add_argument("--days", type=int, default=500)
+
+    sp = add("combo-study", cmd_combo_study, "a long-only perp core plus a small high-leverage swing sleeve feeding it, versus spot")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch (Coinbase ETH-USD starts in May 2016)")
 
     sp = add("cycle-study", cmd_cycle_study, "dip-buying with leverage versus holding spot, inside each bull phase and over the whole history")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch (Coinbase ETH-USD starts in May 2016)")

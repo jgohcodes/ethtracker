@@ -350,20 +350,26 @@ def episodes(starts: list[pd.Timestamp], gap_days: int = 60) -> list[list[pd.Tim
     return groups
 
 
-def rolling(full: pd.DataFrame, cfg: Config, starts: list[pd.Timestamp], years: int = HORIZON_YEARS) -> list[Rolling]:
-    """Every strategy from every start date, ``years`` forward, summarised across the starts."""
+def rolling(full: pd.DataFrame, cfg: Config, starts: list[pd.Timestamp], years: int = HORIZON_YEARS,
+            runner=None) -> list[Rolling]:
+    """Every strategy from every start date, ``years`` forward, summarised across the starts.
+
+    ``runner(full, start, end, cfg, rules)`` returns one result per strategy, holding spot first; it
+    defaults to this module's strategies. Each result needs ``name``, ``multiple`` and ``liquidated``.
+    """
+    runner = runner or (lambda full, start, end, cfg, rules: run_window(full, start, end, cfg, rules=rules))
     rules = Rules.of(full)
     groups = episodes(starts)
     episode_of = {day: k for k, group in enumerate(groups) for day in group}
-    runs = {day: run_window(full, day, day + pd.DateOffset(years=years), cfg, rules=rules) for day in starts}
+    runs = {day: runner(full, day, day + pd.DateOffset(years=years), cfg, rules) for day in starts}
+    spot = np.array([runs[day][0].multiple for day in starts])
     out = []
-    for j, strategy in enumerate(STRATEGIES):
+    for j, first in enumerate(runs[starts[0]]):
         results = [runs[day][j] for day in starts]
         multiples = np.array([r.multiple for r in results])
-        spot = np.array([runs[day][0].multiple for day in starts])
         vs = np.divide(multiples, spot, out=np.full(len(spot), np.nan), where=spot > 0)
         by_episode = tuple(float(np.nanmedian([v for day, v in zip(starts, vs) if episode_of[day] == k]))
                            for k in range(len(groups)))
-        out.append(Rolling(strategy.name, len(results), float(np.median(multiples)), float(np.mean(vs > 1)),
+        out.append(Rolling(first.name, len(results), float(np.median(multiples)), float(np.mean(vs > 1)),
                            float(np.mean([r.liquidated is not None for r in results])), float(multiples.min()), by_episode))
     return out

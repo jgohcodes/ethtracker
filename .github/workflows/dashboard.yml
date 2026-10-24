@@ -70,3 +70,7 @@ jobs:
       - name: Cycle study
         if: ${{ inputs.study }}
         run: ethtracker cycle-study --days 4000
+      # A long-only perp core plus a small high-leverage swing sleeve feeding it, versus spot.
+      - name: Two-sleeve study
+        if: ${{ inputs.study }}
+        run: ethtracker combo-study --days 4000
