@@ -70,6 +70,18 @@ def _phase(kind: str, close: pd.Series, start, end, *, from_bottom: bool, comple
     return Phase(kind, start, end, float(close[start]), float(close[end]), _drawdown(part.to_numpy()), from_bottom, complete)
 
 
+def ignore_flash_prints(df: pd.DataFrame, limit: float = 0.5) -> tuple[pd.DataFrame, list[pd.Timestamp]]:
+    """A perpetual is liquidated on its mark price, which is built from several venues, so one venue's
+    flash-crash print does not liquidate it. A low more than ``limit`` below both the previous close and
+    the day's own close is such a print; it is replaced with the lower of the day's open and close.
+    Ordinary crashes (March 2020, May 2021) are nowhere near that and stay in."""
+    floor = np.minimum(df["close"].shift(1), df["close"]) * (1 - limit)
+    bad = (df["low"] < floor).to_numpy()
+    out = df.copy()
+    out.loc[bad, "low"] = np.minimum(df["open"], df["close"])[bad]
+    return out, list(df.index[bad])
+
+
 def find_phases(df: pd.DataFrame, peak_windows=PEAK_WINDOWS) -> list[Phase]:
     """Alternating bull and bear phases, with hindsight. Stops at the first window the data does not reach."""
     close = df["close"]
@@ -219,37 +231,50 @@ def simulate(name: str, df: pd.DataFrame, cfg: Config, *, leverage: float, entri
 # ---- the strategies, fixed in advance -----------------------------------------------------------
 
 @dataclass(frozen=True)
+class Rules:
+    """Every rule computed once on the whole history (the averages need it), then cut to each window."""
+    index: pd.DatetimeIndex
+    first_dip: np.ndarray
+    reclaim: np.ndarray
+    rsi_turn: np.ndarray
+    up: np.ndarray
+    overbought: np.ndarray
+
+    @classmethod
+    def of(cls, full: pd.DataFrame) -> "Rules":
+        return cls(full.index, first_dip_close(full), dip_done_reclaim(full), dip_done_rsi(full), above_trend(full),
+                   (indicators.rsi(full["close"]) >= EXIT_RSI).to_numpy())
+
+    def cut(self, name: str, df: pd.DataFrame) -> np.ndarray:
+        return getattr(self, name)[self.index.get_indexer(df.index)]
+
+
+@dataclass(frozen=True)
 class Strategy:
     name: str
-    run: Callable[[pd.DataFrame, pd.DataFrame, Config, np.ndarray | None], Result]
+    run: Callable[[Rules, pd.DataFrame, Config, bool], Result]
     dip: bool  # a dip-buying rule, which the trend filter applies to
 
 
 def _hold(name, leverage, core=False):
-    return Strategy(name, lambda full, df, cfg, gate: simulate(name, df, cfg, leverage=leverage, core=core), dip=False)
+    return Strategy(name, lambda rules, df, cfg, gated: simulate(name, df, cfg, leverage=leverage, core=core), dip=False)
 
 
 def _trend(name, leverage):
-    def run(full, df, cfg, gate):
-        up = _slice(above_trend(full), full, df)
+    def run(rules, df, cfg, gated):
+        up = rules.cut("up", df)
         return simulate(name, df, cfg, leverage=leverage, entries=up, exits=~up)
     return Strategy(name, run, dip=False)
 
 
 def _dip(name, rule, leverage, core=False, isolated=None):
-    def run(full, df, cfg, gate):
-        entries = _slice(rule(full), full, df)
-        if gate is not None:
-            entries = entries & _slice(gate, full, df)
-        overbought = _slice((indicators.rsi(full["close"]) >= EXIT_RSI).to_numpy(), full, df)
-        return simulate(name, df, cfg, leverage=leverage, entries=entries, exits=overbought, max_hold=MAX_HOLD,
-                        core=core, isolated=isolated)
+    def run(rules, df, cfg, gated):
+        entries = rules.cut(rule, df)
+        if gated:
+            entries = entries & rules.cut("up", df)
+        return simulate(name, df, cfg, leverage=leverage, entries=entries, exits=rules.cut("overbought", df),
+                        max_hold=MAX_HOLD, core=core, isolated=isolated)
     return Strategy(name, run, dip=True)
-
-
-def _slice(values: np.ndarray, full: pd.DataFrame, df: pd.DataFrame) -> np.ndarray:
-    """Rules are computed on the whole history (the averages need it), then cut to the window."""
-    return values[full.index.get_indexer(df.index)]
 
 
 STRATEGIES = (
@@ -258,22 +283,23 @@ STRATEGIES = (
     _hold("Hold perp, 2.5x", 2.5),
     _trend("Trend: long while above 200d avg, 1x", 1.0),
     _trend("Trend: long while above 200d avg, 2.5x", 2.5),
-    _dip("Dip: first close 20% down, 2.5x", first_dip_close, 2.5),
-    _dip("Dip done: back above 10d avg, 1x", dip_done_reclaim, 1.0),
-    _dip("Dip done: back above 10d avg, 2.5x", dip_done_reclaim, 2.5),
-    _dip("Dip done: back above 10d avg, 5x", dip_done_reclaim, 5.0),
-    _dip("Dip done: 10x isolated on 25% of equity", dip_done_reclaim, 10.0, isolated=0.25),
-    _dip("Dip done: RSI back above 30, 2.5x", dip_done_rsi, 2.5),
-    _dip("Spot core + dip-done add-on to 2.5x", dip_done_reclaim, 2.5, core=True),
+    _dip("Dip: first close 20% down, 2.5x", "first_dip", 2.5),
+    _dip("Dip done: back above 10d avg, 1x", "reclaim", 1.0),
+    _dip("Dip done: back above 10d avg, 2.5x", "reclaim", 2.5),
+    _dip("Dip done: back above 10d avg, 5x", "reclaim", 5.0),
+    _dip("Dip done: 10x isolated on 25% of equity", "reclaim", 10.0, isolated=0.25),
+    _dip("Dip done: RSI back above 30, 2.5x", "rsi_turn", 2.5),
+    _dip("Spot core + dip-done add-on to 2.5x", "reclaim", 2.5, core=True),
 )
 
 
-def run_window(full: pd.DataFrame, start, end, cfg: Config, *, gated: bool = False) -> list[Result]:
+def run_window(full: pd.DataFrame, start, end, cfg: Config, *, gated: bool = False,
+               rules: Rules | None = None) -> list[Result]:
     """Every strategy over one window. ``gated`` keeps only the dip rules, entering above the 200d average."""
+    rules = rules or Rules.of(full)
     df = full[start:end]
-    gate = above_trend(full) if gated else None
     chosen = [s for s in STRATEGIES if s.dip or s is STRATEGIES[0]] if gated else STRATEGIES
-    return [s.run(full, df, cfg, gate) for s in chosen]
+    return [s.run(rules, df, cfg, gated) for s in chosen]
 
 
 def chain(windows: list[list[Result]]) -> list[Result]:
@@ -284,4 +310,60 @@ def chain(windows: list[list[Result]]) -> list[Result]:
         multiple = 0.0 if liquidated is not None else float(np.prod([r.multiple for r in rows]))
         out.append(Result(rows[0].name, multiple, max(r.max_drawdown for r in rows), sum(r.trades for r in rows),
                           float(np.mean([r.exposure for r in rows])), liquidated, sum(r.lost_positions for r in rows)))
+    return out
+
+
+# ---- from where we are now: deep below the high, four years forward ------------------------------
+
+DEEP = 0.50  # "near the end of a down cycle", measured without hindsight: this far below the all-time-high close
+HORIZON_YEARS = 4
+
+
+@dataclass(frozen=True)
+class Rolling:
+    name: str
+    starts: int
+    median_multiple: float
+    beat_spot: float  # share of starts where the rule finished ahead of holding spot
+    liquidated: float  # share of starts where the account was liquidated
+    worst: float
+    median_vs_spot_by_episode: tuple[float, ...]
+
+
+def deep_starts(full: pd.DataFrame, depth: float = DEEP, years: int = HORIZON_YEARS, every: int = 7) -> list[pd.Timestamp]:
+    """Every ``every``-th day on which the close was ``depth`` or more below the highest close so far,
+    with a full ``years`` of data after it."""
+    close = full["close"]
+    deep = (close <= close.cummax() * (1 - depth)).to_numpy()
+    room = full.index <= full.index[-1] - pd.DateOffset(years=years)
+    return list(full.index[deep & room][::every])
+
+
+def episodes(starts: list[pd.Timestamp], gap_days: int = 60) -> list[list[pd.Timestamp]]:
+    """Group start dates into separate drawdowns: a gap of more than ``gap_days`` begins a new one."""
+    groups: list[list[pd.Timestamp]] = []
+    for day in starts:
+        if groups and (day - groups[-1][-1]).days <= gap_days:
+            groups[-1].append(day)
+        else:
+            groups.append([day])
+    return groups
+
+
+def rolling(full: pd.DataFrame, cfg: Config, starts: list[pd.Timestamp], years: int = HORIZON_YEARS) -> list[Rolling]:
+    """Every strategy from every start date, ``years`` forward, summarised across the starts."""
+    rules = Rules.of(full)
+    groups = episodes(starts)
+    episode_of = {day: k for k, group in enumerate(groups) for day in group}
+    runs = {day: run_window(full, day, day + pd.DateOffset(years=years), cfg, rules=rules) for day in starts}
+    out = []
+    for j, strategy in enumerate(STRATEGIES):
+        results = [runs[day][j] for day in starts]
+        multiples = np.array([r.multiple for r in results])
+        spot = np.array([runs[day][0].multiple for day in starts])
+        vs = np.divide(multiples, spot, out=np.full(len(spot), np.nan), where=spot > 0)
+        by_episode = tuple(float(np.nanmedian([v for day, v in zip(starts, vs) if episode_of[day] == k]))
+                           for k in range(len(groups)))
+        out.append(Rolling(strategy.name, len(results), float(np.median(multiples)), float(np.mean(vs > 1)),
+                           float(np.mean([r.liquidated is not None for r in results])), float(multiples.min()), by_episode))
     return out

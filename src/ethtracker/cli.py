@@ -483,15 +483,40 @@ def _cycle_table(title: str, rows: list) -> None:
         print(f"  {r.name:<40} {r.multiple:>11,.2f}x {vs:>8} {r.max_drawdown:>7.0%} {r.trades:>6} {r.exposure:>6.0%}  {liq}")
 
 
+def _rolling_table(full: pd.DataFrame, cfg) -> None:
+    close = full["close"]
+    peak_day = close.idxmax()
+    print()
+    print(f"Today: {1 - close.iloc[-1] / close.max():.0%} below the highest close ({close.max():,.2f} on {peak_day:%Y-%m-%d}).")
+    starts = cycles.deep_starts(full)
+    if not starts:
+        print(f"No day {cycles.DEEP:.0%}+ below the high has {cycles.HORIZON_YEARS} years of data after it.")
+        return
+    groups = cycles.episodes(starts)
+    spans = ", ".join(f"{g[0]:%Y-%m} to {g[-1]:%Y-%m}" for g in groups)
+    print(f"From every week ETH closed {cycles.DEEP:.0%}+ below its highest close so far, {cycles.HORIZON_YEARS} years forward, "
+          f"no hindsight: {len(starts)} starts in {len(groups)} separate drawdowns ({spans})")
+    print(f"  {'strategy':<40} {'median x':>10} {'beat spot':>9} {'liquidated':>10} {'worst':>7}  median vs spot, each drawdown")
+    for r in cycles.rolling(full, cfg, starts):
+        each = "  ".join(f"{v:>6.2f}x" for v in r.median_vs_spot_by_episode)
+        print(f"  {r.name:<40} {r.median_multiple:>9,.2f}x {r.beat_spot:>9.0%} {r.liquidated:>10.0%} {r.worst:>6.2f}x  {each}")
+
+
 def cmd_cycle_study(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
-    full = provider.candles(args.days)
+    raw = provider.candles(args.days)
+    full, flashes = cycles.ignore_flash_prints(raw)
+    rules = cycles.Rules.of(full)
     cfg = ctx.cfg
     first, last = full.index[0], full.index[-1]
     print("Cycle study: does buying the end of a large dip, with leverage, beat holding spot?")
     print(f"Data: {len(full)} daily candles, {first:%Y-%m-%d} to {last:%Y-%m-%d} ({provider.name}). "
           f"Funding {cfg.funding_rate_8h:.3%}/8h paid by longs, taker fee {cfg.taker_fee_rate:.2%}, "
           f"maintenance margin {cfg.maintenance_margin_rate:.1%}.")
+    for day in flashes:
+        i = raw.index.get_loc(day)
+        print(f"Ignored for liquidations, as a perp's mark price would: the {day:%Y-%m-%d} low of {raw['low'].iloc[i]:,.2f} "
+              f"between closes of {raw['close'].iloc[max(i - 1, 0)]:,.2f} and {raw['close'].iloc[i]:,.2f}.")
     phases = cycles.find_phases(full)
     print()
     print("Cycle phases, with hindsight: each peak is the highest close in its cycle's window, each trough the lowest close before the next")
@@ -506,7 +531,7 @@ def cmd_cycle_study(args, ctx: Ctx) -> int:
     for ph in phases:
         if ph.kind != "bull":
             continue
-        rows = cycles.run_window(full, ph.start, ph.end, cfg)
+        rows = cycles.run_window(full, ph.start, ph.end, cfg, rules=rules)
         where = "bottom to top" if ph.from_bottom else "start of data to top"
         _cycle_table(f"Bull phase {ph.start:%Y-%m-%d} to {ph.end:%Y-%m-%d} ({where}{', still running' if not ph.complete else ''})", rows)
         if ph.from_bottom and ph.complete:
@@ -516,15 +541,19 @@ def cmd_cycle_study(args, ctx: Ctx) -> int:
     current = phases[-1]
     if current.kind == "bear" and not current.complete:
         _cycle_table(f"Current bear phase {current.start:%Y-%m-%d} to {current.end:%Y-%m-%d} (each rule started at the top)",
-                     cycles.run_window(full, current.start, current.end, cfg))
-    _cycle_table(f"Whole history {first:%Y-%m-%d} to {last:%Y-%m-%d}, no hindsight", cycles.run_window(full, first, last, cfg))
-    _cycle_table(f"Whole history, dip entries only when price is above its {cycles.TREND}-day average", cycles.run_window(full, first, last, cfg, gated=True))
+                     cycles.run_window(full, current.start, current.end, cfg, rules=rules))
+    _rolling_table(full, cfg)
+    _cycle_table(f"Whole history {first:%Y-%m-%d} to {last:%Y-%m-%d}, no hindsight",
+                 cycles.run_window(full, first, last, cfg, rules=rules))
+    _cycle_table(f"Whole history, dip entries only when price is above its {cycles.TREND}-day average",
+                 cycles.run_window(full, first, last, cfg, gated=True, rules=rules))
     print()
     print(f"Rules: a large dip is a close {cycles.DIP:.0%} below the 30-day high. Dip rules sell when RSI(14) reaches {cycles.EXIT_RSI:.0f} "
           f"or after {cycles.MAX_HOLD} days. Leverage is total exposure / equity in one cross-margin account.")
     print("Hindsight flatters: every bull phase above starts at the exact bottom, which suits holding with leverage most of all.")
     print("Funding is held constant; in bull markets it has run higher, which costs every leveraged row in proportion to time held.")
     print("Trades at the daily close, liquidation at the day's low, no slippage. The spot-core rule assumes spot counts as collateral.")
+    print("Overlapping start dates are not independent: the rolling table holds as many real observations as it has drawdowns.")
     print(f"{len(cycles.STRATEGIES)} fixed rules, not tuned. Trust what holds in every phase, not the best row in one.")
     return 0
 

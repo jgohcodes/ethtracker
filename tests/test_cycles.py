@@ -193,7 +193,8 @@ def test_cycle_study_command(tmp_path, capsys):
     text = capsys.readouterr().out
     for heading in ("Cycle phases", "(bottom to top)", "back to back", "Current bear phase", "Whole history", "above its 200-day average"):
         assert heading in text, heading
-    assert text.count("Hold spot, 1x") == 7  # three bulls, the chain, the current bear, two whole-history tables
+    assert text.count("Hold spot, 1x") == 8  # three bulls, the chain, the current bear, rolling, two whole-history tables
+    assert "separate drawdowns" in text and "Today:" in text
 
 
 def test_an_isolated_liquidation_costs_only_that_positions_margin():
@@ -222,3 +223,32 @@ def test_no_strategy_ever_reports_negative_equity(seed):
     df.index = pd.date_range("2019-01-01", periods=len(df), freq="D", tz="UTC")
     for result in cycles.run_window(df, df.index[0], df.index[-1], FREE):
         assert 0.0 <= result.max_drawdown <= 1.0 and result.multiple >= 0.0, result.name
+
+
+def test_flash_prints_are_ignored_but_real_crashes_stay():
+    df = path([300, 310, 300, 150, 140], lows=[300, 0.10, 290, 100, 135])
+    cleaned, days = cycles.ignore_flash_prints(df)
+    assert days == [pd.Timestamp("2024-01-02", tz="UTC")]
+    assert cleaned["low"].iloc[1] == 310  # the lower of that day's open and close (equal in this helper)
+    assert cleaned["low"].iloc[3] == 100  # a 50% fall in a day is a crash, not a bad print
+    assert cleaned["close"].equals(df["close"])
+
+
+def test_deep_starts_need_a_deep_drawdown_and_a_full_horizon():
+    df = cycle_path()
+    starts = cycles.deep_starts(df)
+    close = df["close"]
+    assert starts and all(close[d] <= 0.5 * close[:d].max() for d in starts)
+    assert max(starts) <= df.index[-1] - pd.DateOffset(years=4)
+    groups = cycles.episodes(starts)
+    assert all((b[0] - a[-1]).days > 60 for a, b in zip(groups, groups[1:]))
+
+
+def test_rolling_summarises_every_strategy_across_starts():
+    df = cycle_path()
+    starts = cycles.deep_starts(df)[:6]
+    table = cycles.rolling(df, FREE, starts)
+    assert [r.name for r in table] == [s.name for s in cycles.STRATEGIES]
+    spot = table[0]
+    assert spot.starts == 6 and spot.beat_spot == 0.0 and spot.liquidated == 0.0
+    assert all(v == pytest.approx(1.0) for v in spot.median_vs_spot_by_episode)
