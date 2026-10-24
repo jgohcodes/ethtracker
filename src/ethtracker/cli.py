@@ -938,6 +938,57 @@ def cmd_pullback_study(args, ctx: Ctx) -> int:
     return 0
 
 
+def cmd_timing_study(args, ctx: Ctx) -> int:
+    asset, full, cfg, _ = _asset_history(args, ctx, "buying every week: does picking the day within a few days help, "
+                                                    "and how often did price break a floor under the start?")
+    timing = pullbacks.Timing(full, cfg)
+    for title, starts in (
+        (f"Buying one unit every week for {cycles.HORIZON_YEARS} years, from a start every 4 weeks", pullbacks.regular_starts(full)),
+        (f"The same, from every week {asset} closed {swing.today_depth(full):.0%}+ below its high (like today)",
+         cycles.deep_starts(full, depth=swing.today_depth(full))),
+    ):
+        if not starts:
+            continue
+        ratios: dict[str, list[float]] = {}
+        for day in starts:
+            rows = timing.run(full, day, day + pd.DateOffset(years=cycles.HORIZON_YEARS), cfg)
+            for r in rows:
+                ratios.setdefault(r.name, []).append(r.multiple / rows[0].multiple - 1)
+        print()
+        print(f"{title}: {len(starts)} starts. The buy may fall on any of {pullbacks.WINDOW} days each week; "
+              "coins bought against buying on the fixed day")
+        print(f"  {'rule':<52} {'median':>8} {'better in':>9} {'worst':>7} {'best':>7}")
+        for name, values in ratios.items():
+            v = np.array(values)
+            print(f"  {name:<52} {np.median(v):>+8.1%} {np.mean(v > 0):>9.0%} {v.min():>+7.1%} {v.max():>+7.1%}")
+
+    depth = swing.today_depth(full)
+    starts = cycles.deep_starts(full, depth=depth)
+    floors = list(pullbacks.FLOORS)
+    now = full["close"].iloc[-1]
+    if args.floor:
+        floors.append(1 - args.floor / now)
+    breaches = pullbacks.floor_breaches(full, starts, depths=floors)
+    print()
+    print(f"How often {asset} traded through a floor under the starting price, from every week it closed {depth:.0%}+ "
+          f"below its high ({len(starts)} starts in {len(cycles.episodes(starts))} drawdowns)")
+    print(f"  {'floor':<34} " + " ".join(f"{f'within {y}y':>10}" for y in pullbacks.FLOOR_YEARS))
+    for d in floors:
+        label = f"{d:.0%} under the start" + (f" (yours: {args.floor:,.0f} from {now:,.0f})" if args.floor and d == floors[-1] else "")
+        print(f"  {label:<34} " + " ".join(f"{breaches[d][y]:>10.0%}" for y in pullbacks.FLOOR_YEARS))
+    if args.floor:
+        mmr = cfg.maintenance_margin_rate
+        print()
+        print(f"Adding new cash with the liquidation price kept at {args.floor:,.0f}: the most leverage each add can carry")
+        for move in (-0.2, -0.1, 0.0, 0.3, 0.75):
+            price = now * (1 + move)
+            print(f"  at {price:>10,.0f} ({move:+.0%} from today): {pullbacks.add_leverage_cap(price, args.floor, mmr):.2f}x")
+    print()
+    print("Rules decide each day from that day's close only; the hindsight rows show the most and least any rule could do.")
+    print("A breached floor liquidates everything added against it, not just the latest add.")
+    return 0
+
+
 def cmd_signals_study(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
     df = provider.candles(args.days)
@@ -1381,6 +1432,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("swing-study", cmd_swing_study, "buy a sharp pullback, sell only into a spike, on ETH or BTC, versus holding spot")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
+
+    sp = add("timing-study", cmd_timing_study, "buy weekly but pick the day within a few days; and how often price broke a floor")
+    sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
+    sp.add_argument("--floor", type=float, help="your liquidation floor, in dollars")
 
     sp = add("pullback-study", cmd_pullback_study, "how often 'the pullback is over' signals were right, buy orders under the price, and weekly adding")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")

@@ -251,3 +251,80 @@ def regular_starts(full: pd.DataFrame, years: int = cycles.HORIZON_YEARS, every:
 def above_trend_today(full: pd.DataFrame) -> bool:
     avg = indicators.sma(full["close"], cycles.TREND).iloc[-1]
     return bool(full["close"].iloc[-1] > avg)
+
+
+# ---- buying every week, with a few days' choice of when ----------------------------------------------
+
+WINDOW = 4  # the weekly buy may happen on any of these days
+FLOORS = (0.30, 0.40, 0.50, 0.60, 0.67)
+FLOOR_YEARS = (1, 2, 4)
+
+
+def window_signals(df: pd.DataFrame) -> dict[str, np.ndarray]:
+    """Rules that can be followed live: buy on the first day of the window that qualifies, else on its last day."""
+    close = df["close"]
+    rsi = indicators.rsi(close)
+    return {
+        "First red day, else the 4th": (close < close.shift(1)).to_numpy(),
+        "First day 3%+ under the 7-day high, else the 4th": (close <= close.rolling(7, min_periods=1).max() * 0.97).to_numpy(),
+        "First day RSI under 40, else the 4th": (rsi < 40).to_numpy(),
+        "First close under the 10-day average, else the 4th": (close < indicators.sma(close, 10)).to_numpy(),
+    }
+
+
+def window_buy_days(df: pd.DataFrame, good: np.ndarray | str | None, window: int = WINDOW) -> np.ndarray:
+    """The day bought in each week. ``good`` is a rule's qualifying days, "best"/"worst" for the lowest/highest
+    close of the window (hindsight, impossible live), or None for the window's first day."""
+    close = df["close"].to_numpy(float)
+    days = []
+    for s in range(0, len(close) - window + 1, WEEK):
+        span = slice(s, s + window)
+        if good is None:
+            days.append(s)
+        elif isinstance(good, str):
+            pick = np.argmin(close[span]) if good == "best" else np.argmax(close[span])
+            days.append(s + int(pick))
+        else:
+            hits = np.flatnonzero(good[span])
+            days.append(s + int(hits[0]) if len(hits) else s + window - 1)
+    return np.array(days, dtype=int)
+
+
+class Timing:
+    """The weekly buy on a fixed day, by each rule, and at the window's best and worst close."""
+
+    def __init__(self, full: pd.DataFrame, cfg):
+        self.full, self.fee = full, cfg.taker_fee_rate
+        self.rules: dict[str, np.ndarray | str | None] = {"Fixed day (the window's first)": None}
+        self.rules.update(window_signals(full))
+        self.rules["Lowest close of the 4 days (hindsight)"] = "best"
+        self.rules["Highest close of the 4 days (hindsight)"] = "worst"
+
+    def run(self, full, start, end, cfg, rules=None) -> list[Accumulated]:
+        df = self.full[start:end]
+        at = self.full.index.get_indexer(df.index)
+        close = df["close"].to_numpy(float)
+        out = []
+        for name, good in self.rules.items():
+            days = window_buy_days(df, good if not isinstance(good, np.ndarray) else good[at])
+            coins = np.sum((1 - self.fee) / close[days])
+            out.append(Accumulated(name, float(coins * close[-1] / len(days)), 0.0))
+        return out
+
+
+def floor_breaches(full: pd.DataFrame, starts: list[pd.Timestamp], depths=FLOORS, years=FLOOR_YEARS) -> dict[float, dict[int, float]]:
+    """From each start: the share where the price traded ``depth`` or more below the starting close within ``years``."""
+    low = full["low"]
+    out = {}
+    for depth in depths:
+        out[depth] = {}
+        for y in years:
+            hits = [low[day:day + pd.DateOffset(years=y)].min() <= full["close"][day] * (1 - depth) for day in starts]
+            out[depth][y] = float(np.mean(hits)) if hits else float("nan")
+    return out
+
+
+def add_leverage_cap(price: float, floor: float, mmr: float) -> float:
+    """The most leverage new cash can carry, added at ``price``, without lifting the liquidation price above ``floor``."""
+    room = price - floor * (1 - mmr)
+    return price / room if room > 0 else float("inf")

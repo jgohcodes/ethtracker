@@ -19,7 +19,7 @@ on:
         type: boolean
         default: false
       studies:
-        description: "Which studies: all, or a list from signals, backtest, cycle, combo, short, swing, trim, pullbacks"
+        description: "Which studies: all, or a list from signals, backtest, cycle, combo, short, swing, trim, pullbacks, timing"
         type: string
         default: all
 
@@ -103,3 +103,10 @@ jobs:
       - name: Pullback study, BTC
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'pullbacks')) }}
         run: ethtracker pullback-study --asset BTC --days 4000
+      # Buying weekly but picking the day within a few days, and how often price broke a floor under the start.
+      - name: Timing study, ETH
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'timing')) }}
+        run: ethtracker timing-study --asset ETH --days 4000 --floor 1300
+      - name: Timing study, BTC
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'timing')) }}
+        run: ethtracker timing-study --asset BTC --days 4000

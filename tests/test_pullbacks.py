@@ -4,6 +4,7 @@ import pytest
 
 from ethtracker import derivs, pullbacks
 from ethtracker.cli import main
+from ethtracker.config import Config
 
 from tests.conftest import synthetic_candles
 from tests.test_cycles import cycle_path, flags, path
@@ -107,4 +108,58 @@ def test_pullback_study_command(tmp_path, capsys, monkeypatch):
     text = capsys.readouterr().out
     for heading in ("Last fired", "How often the low held", "as it is today", "A buy order under the close",
                     "Adding one unit every week", "like today", "Every week (DCA)", "Funding flips negative"):
+        assert heading in text, heading
+
+
+# ---- buying every week, with a few days' choice ------------------------------------------------------
+
+def test_the_weekly_buy_takes_the_first_qualifying_day_or_the_last():
+    df = bars([100.0, 101, 99, 98, 97, 96, 95] + [90.0, 91, 92, 93, 94, 95, 96])
+    good = np.array([False, False, True, True, False, False, False] + [False] * 7)
+    assert list(pullbacks.window_buy_days(df, good)) == [2, 10]  # week 2 has no qualifying day: its 4th day
+    assert list(pullbacks.window_buy_days(df, None)) == [0, 7]
+    assert list(pullbacks.window_buy_days(df, "best")) == [3, 7] and list(pullbacks.window_buy_days(df, "worst")) == [1, 10]
+
+
+def test_hindsight_bounds_every_rule():
+    df = synthetic_candles(n=800, seed=13)
+    rows = {r.name: r.multiple for r in pullbacks.Timing(df, Config()).run(df, df.index[0], df.index[-1], Config())}
+    best, worst = rows.pop("Lowest close of the 4 days (hindsight)"), rows.pop("Highest close of the 4 days (hindsight)")
+    assert all(worst <= m <= best for m in rows.values())
+
+
+def test_floor_breaches_count_the_lows_after_each_start():
+    df = path([100.0] * 800, lows=[100.0] * 400 + [55.0] + [100.0] * 399)
+    starts = [df.index[0], df.index[500]]
+    out = pullbacks.floor_breaches(df, starts, depths=(0.40, 0.50), years=(1, 2))
+    assert out[0.40][2] == 0.5 and out[0.50][2] == 0.0  # only the first start saw the 45% dip, within two years
+    assert out[0.40][1] == 0.0  # day 400 is more than a year after the first start
+
+
+def test_new_cash_can_carry_more_leverage_the_nearer_price_is_to_the_floor():
+    caps = [pullbacks.add_leverage_cap(p, 1300.0, 0.005) for p in (1800.0, 2313.0, 4000.0)]
+    assert caps == sorted(caps, reverse=True) and caps[1] == pytest.approx(2.27, abs=0.01)
+    # adding at exactly that cap leaves a position already at the floor with its liquidation price unchanged
+    floor, price, mmr = 1300.0, 2313.0, 0.005
+    qty, equity = 1.0, 1.0 * (price - floor * (1 - mmr))  # a position whose liquidation price is the floor
+    added = 0.5
+    deposit = added * price / caps[1]
+    liq = ((qty + added) * price - (equity + deposit)) / ((qty + added) * (1 - mmr))
+    assert liq == pytest.approx(floor)
+
+
+def test_timing_study_command(tmp_path, capsys, monkeypatch):
+    df = cycle_path()
+    rng = np.random.default_rng(5)
+    noisy = df["close"] * np.exp(rng.normal(0, 0.03, len(df)))
+    df = path(noisy.to_numpy(), lows=(noisy * 0.95).to_numpy(), start="2016-05-18")
+    out = df.copy()
+    out.insert(0, "date", out.index.strftime("%Y-%m-%d"))
+    out.to_csv(tmp_path / "prices.csv", index=False)
+    monkeypatch.setattr(derivs, "fetch_funding_history",
+                        lambda start, end, **kw: (pd.Series(0.0001, index=pd.date_range(start, end, freq="D", tz="UTC")), 0))
+    assert main(["--provider", "csv", "--csv", str(tmp_path / "prices.csv"), "timing-study", "--floor", "1300"]) == 0
+    text = capsys.readouterr().out
+    for heading in ("may fall on any of 4 days", "Fixed day (the window's first)", "Lowest close of the 4 days (hindsight)",
+                    "traded through a floor", "(yours: 1,300", "the most leverage each add can carry"):
         assert heading in text, heading
