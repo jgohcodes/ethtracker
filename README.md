@@ -156,7 +156,9 @@ Vercel only stores and displays; the maths runs in the job, which never holds an
    This updates the page immediately and pushes your journal, so every daily run marks the same positions. Run it after every trade.
 7. Open the site and paste the `DASHBOARD_TOKEN`.
 
-Without the GitHub secrets the job still runs as a **dry run**: live data, computed, nothing published. That is a quick check that the data sources work from GitHub's runners. "Run workflow" with *study* ticked also prints `signals-study` on the full daily history.
+Without the GitHub secrets the job still runs as a **dry run**: live data, computed, nothing published. That is a quick check that the data sources work from GitHub's runners. "Run workflow" with *study* ticked also prints `signals-study` and backtests the pullback entry rule (20% and 15% below the 30-day high, 3x ATR stop, 14-day time stop, at 10x and 2.5x) on the full daily history.
+
+**Code changes versus data.** The daily numbers reach the page through the API, so nothing is redeployed for them. Vercel redeploys only when the code changes. On the Hobby plan a commit whose author is not the Vercel account owner (commits made by an assistant included) can wait for your approval in Vercel before it deploys, and in a private repository it is refused; redeploy from the Vercel dashboard if that happens.
 
 **Freshness.** The page judges age against the cadence the snapshot declares: a daily snapshot is "Updated" for 30 hours, "Late" after that and "Stale" after 54, with a banner saying where to look. The time is the server's receive time, which a client cannot forge.
 
@@ -166,7 +168,7 @@ Without the GitHub secrets the job still runs as a **dry run**: live data, compu
 
 - The page is public; all data sits behind tokens. On Vercel's Hobby plan the production domain stays public (Vercel Authentication covers only previews there), so `DASHBOARD_TOKEN` is the lock. Treat it like a password; rotate by changing the variable and redeploying.
 - The browser's token can read only the snapshot. It cannot write, and it cannot read the raw journal (`/api/state` takes the write token).
-- The job's logs are public because the repository is: `cloud-run` prints market facts and counts only, never equity, sizes or positions, and GitHub masks the secrets.
+- The job's logs are public because the repository is: `cloud-run` prints market facts only (the close, signal counts, whether a journal was found), never equity, sizes or even how many positions are open, and GitHub masks the secrets.
 - `publish` and `cloud-run` refuse plain `http://` (except localhost) and read tokens from the environment only. The page inserts everything as text, never markup. No Content-Security-Policy is set: a correct one needs testing in a browser against TradingView's domains.
 
 **The chart** is TradingView's free embedded widget on the daily interval, defaulting to `COINBASE:ETHUSD` (the same spot data the signals use). Use `?symbol=EXCHANGE:SYMBOL` to change it. The widget cannot draw your entries, stops or the computed levels, so the price ladder lists them in price order beside the mark.
