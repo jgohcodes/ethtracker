@@ -66,3 +66,7 @@ jobs:
           echo "::group::15% pullback, 2.5x"
           ethtracker study --days 3000 --trigger 15 --stop-atr 3 --leverage 2.5
           echo "::endgroup::"
+      # Dip-buying with leverage versus holding spot, inside each bull phase of the 4-year cycle and overall.
+      - name: Cycle study
+        if: ${{ inputs.study }}
+        run: ethtracker cycle-study --days 4000

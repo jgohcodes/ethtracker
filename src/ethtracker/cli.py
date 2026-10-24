@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, config, derivs, indicators, risk, signals, snapshot, study
+from . import advice, alerts, config, cycles, derivs, indicators, risk, signals, snapshot, study
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -471,6 +471,64 @@ def cmd_cloud_run(args, ctx: Ctx) -> int:
     return 0
 
 
+def _cycle_table(title: str, rows: list) -> None:
+    spot = rows[0].multiple
+    print()
+    print(title)
+    print(f"  {'strategy':<40} {'x start':>12} {'vs spot':>8} {'max DD':>7} {'trades':>6} {'in mkt':>6}  liquidated")
+    for r in rows:
+        vs = f"{r.multiple / spot:.2f}x" if spot > 0 else "n/a"
+        liq = (f"account {r.liquidated:%Y-%m-%d}" if r.liquidated is not None
+               else f"{r.lost_positions} position(s)" if r.lost_positions else "")
+        print(f"  {r.name:<40} {r.multiple:>11,.2f}x {vs:>8} {r.max_drawdown:>7.0%} {r.trades:>6} {r.exposure:>6.0%}  {liq}")
+
+
+def cmd_cycle_study(args, ctx: Ctx) -> int:
+    provider = _provider(args, ctx)
+    full = provider.candles(args.days)
+    cfg = ctx.cfg
+    first, last = full.index[0], full.index[-1]
+    print("Cycle study: does buying the end of a large dip, with leverage, beat holding spot?")
+    print(f"Data: {len(full)} daily candles, {first:%Y-%m-%d} to {last:%Y-%m-%d} ({provider.name}). "
+          f"Funding {cfg.funding_rate_8h:.3%}/8h paid by longs, taker fee {cfg.taker_fee_rate:.2%}, "
+          f"maintenance margin {cfg.maintenance_margin_rate:.1%}.")
+    phases = cycles.find_phases(full)
+    print()
+    print("Cycle phases, with hindsight: each peak is the highest close in its cycle's window, each trough the lowest close before the next")
+    print(f"  {'phase':<5} {'from':<10}  {'to':<10} {'from close':>11} {'to close':>10} {'change':>9} {'worst fall inside':>18}")
+    for ph in phases:
+        note = "  (starts where the data does)" if ph.kind == "bull" and not ph.from_bottom else ""
+        note += "  (still running)" if not ph.complete else ""
+        print(f"  {ph.kind:<5} {ph.start:%Y-%m-%d}  {ph.end:%Y-%m-%d} {ph.start_close:>11,.2f} {ph.end_close:>10,.2f} "
+              f"{ph.change:>+9.0%} {-ph.worst_fall:>18.0%}{note}")
+
+    bulls = []
+    for ph in phases:
+        if ph.kind != "bull":
+            continue
+        rows = cycles.run_window(full, ph.start, ph.end, cfg)
+        where = "bottom to top" if ph.from_bottom else "start of data to top"
+        _cycle_table(f"Bull phase {ph.start:%Y-%m-%d} to {ph.end:%Y-%m-%d} ({where}{', still running' if not ph.complete else ''})", rows)
+        if ph.from_bottom and ph.complete:
+            bulls.append(rows)
+    if len(bulls) > 1:
+        _cycle_table(f"The {len(bulls)} bottom-to-top bull phases back to back (out at each top, back in at each bottom)", cycles.chain(bulls))
+    current = phases[-1]
+    if current.kind == "bear" and not current.complete:
+        _cycle_table(f"Current bear phase {current.start:%Y-%m-%d} to {current.end:%Y-%m-%d} (each rule started at the top)",
+                     cycles.run_window(full, current.start, current.end, cfg))
+    _cycle_table(f"Whole history {first:%Y-%m-%d} to {last:%Y-%m-%d}, no hindsight", cycles.run_window(full, first, last, cfg))
+    _cycle_table(f"Whole history, dip entries only when price is above its {cycles.TREND}-day average", cycles.run_window(full, first, last, cfg, gated=True))
+    print()
+    print(f"Rules: a large dip is a close {cycles.DIP:.0%} below the 30-day high. Dip rules sell when RSI(14) reaches {cycles.EXIT_RSI:.0f} "
+          f"or after {cycles.MAX_HOLD} days. Leverage is total exposure / equity in one cross-margin account.")
+    print("Hindsight flatters: every bull phase above starts at the exact bottom, which suits holding with leverage most of all.")
+    print("Funding is held constant; in bull markets it has run higher, which costs every leveraged row in proportion to time held.")
+    print("Trades at the daily close, liquidation at the day's low, no slippage. The spot-core rule assumes spot counts as collateral.")
+    print(f"{len(cycles.STRATEGIES)} fixed rules, not tuned. Trust what holds in every phase, not the best row in one.")
+    return 0
+
+
 def cmd_signals_study(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
     df = provider.candles(args.days)
@@ -910,6 +968,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="fetch live data and compute, but publish nothing (needs no dashboard)")
     sp.add_argument("--out", type=Path, help="also write the snapshot JSON here")
     sp.add_argument("--days", type=int, default=500)
+
+    sp = add("cycle-study", cmd_cycle_study, "dip-buying with leverage versus holding spot, inside each bull phase and over the whole history")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch (Coinbase ETH-USD starts in May 2016)")
 
     sp = add("signals-study", cmd_signals_study, "how the technical risk-flag count related to later drawdowns and rallies in history")
     sp.add_argument("--horizon", type=int, help="days ahead (default: config max_holding_days)")
