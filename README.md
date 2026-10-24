@@ -27,6 +27,7 @@ State lives in `~/.ethtracker` (override with `ETHTRACKER_HOME`): `config.toml` 
 | `signals-study` | Tests the candle-derived risk flags against history: what followed days with 0, 1, 2+ flags |
 | `cycle-study` | Dip-buying with leverage versus holding spot: inside each bull phase of the 4-year cycle (found with hindsight) and over the whole history with a 200-day trend filter |
 | `combo-study` | A long-only perp core (held or kept at its leverage) plus a small 10-15x swing sleeve whose profits are swept into it, against spot: by cycle phase, over 4-year windows from deep drawdowns, with funding sensitivity and the growth arithmetic of leverage |
+| `short-study` | Short-term shorts when ETH looks overheated (the dashboard's 2+ flags, RSI 80+, funding 0.05%/8h+ from Deribit's funding history) at 1-15x, and the same signals used to cut the 2.5x core to 1x until it cools |
 | `publish` / `cloud-run` / `dashboard-json` | `publish` sends the dashboard snapshot from your machine and pushes your journal (run it after each trade); `cloud-run` is the daily job GitHub Actions runs; `dashboard-json` prints what would be sent. See [Dashboard](#dashboard) |
 | `watch` | Polls the price; fires once on level crossings (`--above`, `--below`) and on position and whole-book flags. With open positions it recomputes each recommended action every poll and announces only when one changes. `--record` also logs derivatives data; `--once` for cron |
 | `equity`, `history` | Show/set equity; closed trades with R-multiples |
@@ -158,7 +159,7 @@ Vercel only stores and displays; the maths runs in the job, which never holds an
    This updates the page immediately and pushes your journal, so every daily run marks the same positions. Run it after every trade.
 7. Open the site and paste the `DASHBOARD_TOKEN`.
 
-Without the GitHub secrets the job still runs as a **dry run**: live data, computed, nothing published. That is a quick check that the data sources work from GitHub's runners. "Run workflow" with *study* ticked also prints `signals-study`, backtests the pullback entry rule (20% and 15% below the 30-day high, 3x ATR stop, 14-day time stop, at 10x and 2.5x) and runs `cycle-study` and `combo-study` on the full daily history.
+Without the GitHub secrets the job still runs as a **dry run**: live data, computed, nothing published. That is a quick check that the data sources work from GitHub's runners. "Run workflow" with *study* ticked also prints `signals-study`, backtests the pullback entry rule (20% and 15% below the 30-day high, 3x ATR stop, 14-day time stop, at 10x and 2.5x) and runs `cycle-study`, `combo-study` and `short-study` on the full daily history.
 
 **Code changes versus data.** The daily numbers reach the page through the API, so nothing is redeployed for them. Vercel redeploys only when the code changes. On the Hobby plan a commit whose author is not the Vercel account owner (commits made by an assistant included) can wait for your approval in Vercel before it deploys, and in a private repository it is refused; redeploy from the Vercel dashboard if that happens.
 

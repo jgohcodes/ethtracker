@@ -74,3 +74,7 @@ jobs:
       - name: Two-sleeve study
         if: ${{ inputs.study }}
         run: ethtracker combo-study --days 4000
+      # Short-term shorts on overheating signals (incl. Deribit's funding history), alone and as a cut to the core.
+      - name: Short study
+        if: ${{ inputs.study }}
+        run: ethtracker short-study --days 4000

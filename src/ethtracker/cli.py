@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, combo, config, cycles, derivs, indicators, risk, signals, snapshot, study
+from . import advice, alerts, combo, config, cycles, derivs, indicators, risk, shorts, signals, snapshot, study
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -653,6 +653,96 @@ def cmd_combo_study(args, ctx: Ctx) -> int:
     return 0
 
 
+FUNDING_HISTORY_FROM = "2019-01-01"
+
+
+def _overlay_table(title: str, rows: list) -> None:
+    core = rows[0].multiple
+    print()
+    print(title)
+    print(f"  {'strategy':<52} {'x start':>12} {'vs core':>8} {'max DD':>7} {'cuts':>5}  liquidated")
+    for r in rows:
+        vs = f"{r.multiple / core:.2f}x" if core > 0 else "n/a"
+        dead = f"{r.liquidated:%Y-%m-%d}" if r.liquidated is not None else ""
+        print(f"  {r.name:<52} {r.multiple:>11,.2f}x {vs:>8} {r.max_drawdown:>7.0%} {r.trades:>5}  {dead}")
+
+
+def cmd_short_study(args, ctx: Ctx) -> int:
+    provider = _provider(args, ctx)
+    raw = provider.candles(args.days)
+    full, _ = cycles.ignore_flash_prints(raw)
+    cfg = ctx.cfg
+    first, last = full.index[0], full.index[-1]
+    print("Shorting an overheated market: in at the signal's close, covered at the first close below the "
+          f"{shorts.COOL_AVG}-day average or after {shorts.HORIZON} days")
+    print(f"Candles: {len(full)} days, {first:%Y-%m-%d} to {last:%Y-%m-%d} ({provider.name}). "
+          f"Taker fee {cfg.taker_fee_rate:.2%}, maintenance margin {cfg.maintenance_margin_rate:.1%}.")
+    funding8h = None
+    try:
+        funding8h, failed = derivs.fetch_funding_history(pd.Timestamp(FUNDING_HISTORY_FROM, tz="UTC"), last + pd.Timedelta(days=1))
+        funding8h = funding8h[(funding8h.index >= first) & (funding8h.index <= last)]
+        print(f"Funding: Deribit {derivs.HISTORY_INSTRUMENT}, {len(funding8h)} days from {funding8h.index[0]:%Y-%m-%d} to "
+              f"{funding8h.index[-1]:%Y-%m-%d}; median {funding8h.median():.4%}/8h, mean {funding8h.mean():.4%}/8h, "
+              f"{(funding8h >= shorts.FUNDING_HOT).mean():.0%} of days at {shorts.FUNDING_HOT:.2%}+, "
+              f"{(funding8h < 0).mean():.0%} negative, highest {funding8h.max():.3%}"
+              + (f"; {failed} monthly page(s) failed" if failed else "") + ". "
+              f"Elsewhere {cfg.funding_rate_8h:.3%}/8h is assumed.")
+    except DataError as exc:
+        print(f"Funding history unavailable ({exc}); the funding signal is skipped and {cfg.funding_rate_8h:.3%}/8h is assumed.")
+
+    entries = shorts.overheated(full, cfg, funding8h)
+    cool = shorts.cooled(full)
+    funding = shorts.daily_funding(full, cfg, funding8h)
+
+    print()
+    print(f"What followed each signal over the next {shorts.HORIZON} days (first day of each episode)")
+    print(f"  {'signal':<40} {'episodes':>8} {'median ETH move':>15} {'fell 10%+':>9} {'squeezed a 10x short':>20} {'a 15x short':>11}")
+    everyday = np.ones(len(full), dtype=bool)
+    rows = [shorts.events("Every day (baseline)", full, cfg, everyday)]
+    if funding8h is not None:
+        since = (full.index >= funding8h.index[0])
+        rows.append(shorts.events(f"Every day since {funding8h.index[0]:%Y-%m-%d} (baseline)", full, cfg, everyday & since))
+    rows += [shorts.events(name, full, cfg, e) for name, e in entries.items()]
+    for ev in rows:
+        print(f"  {ev.name:<40} {ev.count:>8} {ev.median_move:>+15.1%} {ev.fell_10:>9.0%} {ev.squeeze[10.0]:>20.0%} {ev.squeeze[15.0]:>11.0%}")
+
+    print()
+    print("Short trades on each signal: return on margin per trade, and the whole sleeve re-staked every trade")
+    print(f"  {'signal':<40} {'lev':>5} {'trades':>6} {'won':>5} {'liquidated':>10} {'mean':>8} {'median':>8} {'re-staked':>11}")
+    for name, e in entries.items():
+        for lev in shorts.LEVERAGES:
+            r = shorts.ShortResult.of(name, lev, shorts.short_returns(full, cfg, e, cool, funding, lev))
+            print(f"  {name:<40} {lev:>4g}x {r.trades:>6} {r.win_rate:>5.0%} {r.liquidated:>10.0%} {r.mean_return:>+8.1%} "
+                  f"{r.median_return:>+8.1%} {r.restaked:>10.2f}x")
+
+    overlay = shorts.Overlay(full, cfg, funding8h)
+    phases = cycles.find_phases(full)
+    for ph in phases:
+        if ph.kind == "bull" and ph.from_bottom and ph.complete and ph.end >= pd.Timestamp(FUNDING_HISTORY_FROM, tz="UTC"):
+            _overlay_table(f"Your {shorts.CORE_LEVERAGE:g}x core, bull phase {ph.start:%Y-%m-%d} to {ph.end:%Y-%m-%d} (bottom to top, hindsight)",
+                           overlay.run(full, ph.start, ph.end, cfg))
+    current = phases[-1]
+    if current.kind == "bear" and not current.complete:
+        _overlay_table(f"Your {shorts.CORE_LEVERAGE:g}x core, current bear phase {current.start:%Y-%m-%d} to {current.end:%Y-%m-%d} (from the top)",
+                       overlay.run(full, current.start, current.end, cfg))
+    era = pd.Timestamp(FUNDING_HISTORY_FROM, tz="UTC")
+    _overlay_table(f"Your {shorts.CORE_LEVERAGE:g}x core, {era:%Y-%m-%d} to {last:%Y-%m-%d} (no hindsight)", overlay.run(full, era, last, cfg))
+    starts = [d for d in cycles.deep_starts(full) if d >= era]
+    if starts:
+        groups = cycles.episodes(starts)
+        print()
+        print(f"Your {shorts.CORE_LEVERAGE:g}x core from every week ETH closed {cycles.DEEP:.0%}+ below its high since {era:%Y}, "
+              f"{cycles.HORIZON_YEARS} years forward: {len(starts)} starts in {len(groups)} separate drawdowns")
+        print(f"  {'strategy':<52} {'median x':>10} {'beat core':>9} {'liquidated':>10} {'worst':>7}")
+        for r in cycles.rolling(full, cfg, starts, runner=overlay.run):
+            print(f"  {r.name:<52} {r.median_multiple:>9,.2f}x {r.beat_spot:>9.0%} {r.liquidated:>10.0%} {r.worst:>6.2f}x")
+    print()
+    print("A short opens at the signal day's close; a later signal while it is open is skipped. Liquidation at the day's high,")
+    print("no slippage. Funding is Deribit's inverse ETH perpetual, a proxy for your venue. In one account a short on the same")
+    print(f"perp nets against the long, so the overlay cuts the core to {shorts.DERISK_TO:g}x and buys the same quantity back when it cools.")
+    return 0
+
+
 def cmd_signals_study(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
     df = provider.candles(args.days)
@@ -1092,6 +1182,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="fetch live data and compute, but publish nothing (needs no dashboard)")
     sp.add_argument("--out", type=Path, help="also write the snapshot JSON here")
     sp.add_argument("--days", type=int, default=500)
+
+    sp = add("short-study", cmd_short_study, "short-term shorts on overheating signals, alone and as a cut to the leveraged core")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch (Coinbase ETH-USD starts in May 2016)")
 
     sp = add("combo-study", cmd_combo_study, "a long-only perp core plus a small high-leverage swing sleeve feeding it, versus spot")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch (Coinbase ETH-USD starts in May 2016)")

@@ -350,6 +350,12 @@ def episodes(starts: list[pd.Timestamp], gap_days: int = 60) -> list[list[pd.Tim
     return groups
 
 
+def _median(values: list[float]) -> float:
+    """Median ignoring NaN (a benchmark that was liquidated leaves no ratio); NaN when nothing is left."""
+    kept = [v for v in values if not np.isnan(v)]
+    return float(np.median(kept)) if kept else float("nan")
+
+
 def rolling(full: pd.DataFrame, cfg: Config, starts: list[pd.Timestamp], years: int = HORIZON_YEARS,
             runner=None) -> list[Rolling]:
     """Every strategy from every start date, ``years`` forward, summarised across the starts.
@@ -368,8 +374,7 @@ def rolling(full: pd.DataFrame, cfg: Config, starts: list[pd.Timestamp], years: 
         results = [runs[day][j] for day in starts]
         multiples = np.array([r.multiple for r in results])
         vs = np.divide(multiples, spot, out=np.full(len(spot), np.nan), where=spot > 0)
-        by_episode = tuple(float(np.nanmedian([v for day, v in zip(starts, vs) if episode_of[day] == k]))
-                           for k in range(len(groups)))
+        by_episode = tuple(_median([v for day, v in zip(starts, vs) if episode_of[day] == k]) for k in range(len(groups)))
         out.append(Rolling(first.name, len(results), float(np.median(multiples)), float(np.mean(vs > 1)),
                            float(np.mean([r.liquidated is not None for r in results])), float(multiples.min()), by_episode))
     return out
