@@ -15,9 +15,13 @@ on:
   workflow_dispatch:
     inputs:
       study:
-        description: "Also run signals-study on the full daily history"
+        description: "Also run the studies on the full daily history"
         type: boolean
         default: false
+      studies:
+        description: "Which studies: all, or a list from signals, backtest, cycle, combo, short, swing, trim, pullbacks"
+        type: string
+        default: all
 
 permissions:
   contents: read
@@ -51,12 +55,12 @@ jobs:
             ethtracker cloud-run --dry-run
           fi
       - name: Signals study
-        if: ${{ inputs.study }}
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'signals')) }}
         run: ethtracker signals-study --days 3000
       # The entry rule itself: a 20% pullback from the 30-day high, 3x ATR stop, 14-day time stop.
       # At 10x isolated the liquidation price sits inside that stop; ~2.5x is what the 40% stress rule allows.
       - name: Pullback backtest
-        if: ${{ inputs.study }}
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'backtest')) }}
         run: |
           for lev in 10 2.5; do
             echo "::group::20% pullback, ${lev}x"
@@ -68,27 +72,34 @@ jobs:
           echo "::endgroup::"
       # Dip-buying with leverage versus holding spot, inside each bull phase of the 4-year cycle and overall.
       - name: Cycle study
-        if: ${{ inputs.study }}
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'cycle')) }}
         run: ethtracker cycle-study --days 4000
       # A long-only perp core plus a small high-leverage swing sleeve feeding it, versus spot.
       - name: Two-sleeve study
-        if: ${{ inputs.study }}
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'combo')) }}
         run: ethtracker combo-study --days 4000
       # Short-term shorts on overheating signals (incl. Deribit's funding history), alone and as a cut to the core.
       - name: Short study
-        if: ${{ inputs.study }}
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'short')) }}
         run: ethtracker short-study --days 4000
       # Buy a sharp pullback, sell only into a spike: on ETH and on BTC.
       - name: Swing study, ETH
-        if: ${{ inputs.study }}
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'swing')) }}
         run: ethtracker swing-study --asset ETH --days 4000
       - name: Swing study, BTC
-        if: ${{ inputs.study }}
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'swing')) }}
         run: ethtracker swing-study --asset BTC --days 4000
       # Trim into spikes, refill on dips, with the liquidation price pinned where it started.
       - name: Trim study, ETH
-        if: ${{ inputs.study }}
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'trim')) }}
         run: ethtracker trim-study --asset ETH --days 4000
       - name: Trim study, BTC
-        if: ${{ inputs.study }}
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'trim')) }}
         run: ethtracker trim-study --asset BTC --days 4000
+      # How often "the pullback is over" signals were right, buy orders under the price, and adding every week.
+      - name: Pullback study, ETH
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'pullbacks')) }}
+        run: ethtracker pullback-study --asset ETH --days 4000
+      - name: Pullback study, BTC
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'pullbacks')) }}
+        run: ethtracker pullback-study --asset BTC --days 4000

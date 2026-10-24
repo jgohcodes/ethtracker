@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, combo, config, cycles, derivs, indicators, risk, shorts, signals, snapshot, study, swing
+from . import advice, alerts, combo, config, cycles, derivs, indicators, pullbacks, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -862,6 +862,82 @@ def cmd_trim_study(args, ctx: Ctx) -> int:
     return 0
 
 
+def _calibration_table(title: str, rows: list) -> None:
+    print()
+    print(title)
+    print(f"  {'signal':<42} {'events':>6} {'low held 30d':>12} {'(95% low)':>9} {'higher 30d':>10} {'90d':>5} "
+          f"{'365d':>5} {'(n)':>5} {'median 90d':>10}")
+    for c in rows:
+        print(f"  {c.name:<42} {c.n:>6} {c.held:>12.0%} {c.held_low:>9.0%} {c.higher[30]:>10.0%} {c.higher[90]:>5.0%} "
+              f"{c.higher[365]:>5.0%} {c.n_year:>5} {c.median_90:>+10.0%}")
+
+
+def cmd_pullback_study(args, ctx: Ctx) -> int:
+    asset, full, cfg, funding8h = _asset_history(
+        args, ctx, "has the pullback run its course? How often 'the low is in' signals were right, and adding every week.")
+    found = pullbacks.signals(full, funding8h)
+    fills = pullbacks.bid_fills(full)
+    up = cycles.above_trend(full)
+    pull = pullbacks.in_pullback(full)
+    close = full["close"]
+    above = pullbacks.above_trend_today(full)
+    print(f"Today: {'above' if above else 'below'} the {cycles.TREND}-day average "
+          f"({indicators.sma(close, cycles.TREND).iloc[-1]:,.2f}); "
+          + ("in a 15%+ pullback" if pull[-1] else "not in a 15%+ pullback")
+          + f"; an order {pullbacks.BID:.0%} under today's close would sit at {close.iloc[-1] * (1 - pullbacks.BID):,.2f}.")
+    last_fired = []
+    for name, mask in found.items():
+        hits = np.flatnonzero(mask)
+        last_fired.append(f"{name}: {full.index[hits[-1]]:%Y-%m-%d}" if len(hits) else f"{name}: never")
+    print("Last fired: " + "; ".join(last_fired) + ".")
+
+    def table(title, keep):
+        rows = [pullbacks.calibrate("Every day (baseline)", full, pullbacks.at_close(full, keep)),
+                pullbacks.calibrate("Every day in a 15%+ pullback (baseline)", full, pullbacks.at_close(full, keep & pull))]
+        rows += [pullbacks.calibrate(name, full, pullbacks.at_close(full, mask & keep)) for name, mask in found.items()]
+        rows.append(pullbacks.calibrate(f"Order {pullbacks.BID:.0%} under, filled", full,
+                                        [(j, px) for j, px in fills if keep[j]], from_fill=True))
+        _calibration_table(title, rows)
+
+    everything = np.ones(len(full), dtype=bool)
+    table(f"How often the low held (no further {pullbacks.FURTHER:.0%} fall in {pullbacks.HELD_DAYS} days) and price was higher, "
+          "all history", everything)
+    regime = up if above else ~up
+    table(f"The same, only when price was {'above' if above else 'below'} its {cycles.TREND}-day average, as it is today", regime)
+
+    print()
+    print(f"A buy order under the close on every 15%+ pullback day, good for {pullbacks.BID_DAYS} days")
+    print(f"  {'order':<14} {'days':>6} {'pullbacks':>9} {'filled':>7} {'low held after':>14} {'higher 90d':>10} {'higher 365d':>11}")
+    for r in pullbacks.ladder(full):
+        level = close.iloc[-1] * (1 - r.depth)
+        print(f"  {f'{r.depth:.0%} under':<14} {r.days:>6} {r.episodes:>9} {r.filled:>7.0%} {r.held:>14.0%} "
+              f"{r.higher_90:>10.0%} {r.higher_365:>11.0%}   (today: {level:,.0f})")
+
+    plans = pullbacks.Plans(full, cfg, funding8h)
+    for title, starts in (
+        (f"Adding one unit every week for {cycles.HORIZON_YEARS} years, from a start every 4 weeks", pullbacks.regular_starts(full)),
+        (f"The same, from every week {asset} closed {swing.today_depth(full):.0%}+ below its high (like today)",
+         cycles.deep_starts(full, depth=swing.today_depth(full))),
+    ):
+        if not starts:
+            continue
+        print()
+        print(f"{title}: {len(starts)} starts. Final value per unit put in; saved cash counts at face value")
+        print(f"  {'plan':<42} {'median':>8} {'beat DCA':>9} {'worst':>7} {'idle cash left':>15}")
+        results = cycles.rolling(full, cfg, starts, runner=plans.run)
+        idle = {}
+        for day in starts:
+            for r in plans.run(full, day, day + pd.DateOffset(years=cycles.HORIZON_YEARS), cfg):
+                idle.setdefault(r.name, []).append(r.idle)
+        for r in results:
+            print(f"  {r.name:<42} {r.median_multiple:>7.2f}x {r.beat_spot:>9.0%} {r.worst:>6.2f}x {np.median(idle[r.name]):>15.0%}")
+    print()
+    print(f"Signals enter at the close of the day they fire; the order fills at its price when the day's low reaches it.")
+    print(f"'Low held': no fall of {pullbacks.FURTHER:.0%} or more below the entry within {pullbacks.HELD_DAYS} days. The 95% low "
+          "column is what the sample size can honestly claim.")
+    return 0
+
+
 def cmd_signals_study(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
     df = provider.candles(args.days)
@@ -1303,6 +1379,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--days", type=int, default=500)
 
     sp = add("swing-study", cmd_swing_study, "buy a sharp pullback, sell only into a spike, on ETH or BTC, versus holding spot")
+    sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
+
+    sp = add("pullback-study", cmd_pullback_study, "how often 'the pullback is over' signals were right, buy orders under the price, and weekly adding")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
 
