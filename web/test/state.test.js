@@ -64,7 +64,7 @@ test("state: names come from an allowlist", () => withServer({}, async ({ call }
   for (const query of ["", "?name=", "?name=snapshot", "?name=__proto__", "?name=journal/../x", "?name=constructor"]) {
     assert.equal((await call(query)).status, 400, query);
   }
-  assert.deepEqual(Object.keys(STATE_LIMITS), ["journal", "derivs"]);
+  assert.deepEqual(Object.keys(STATE_LIMITS), ["journal", "derivs", "trades"]);
 }));
 
 test("state: 404 until stored, then a round trip with a server timestamp and no expiry", () =>

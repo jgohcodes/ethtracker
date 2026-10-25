@@ -454,6 +454,13 @@ function scoreValue(v) {
 }
 const PART_NAMES = { momentum: "Momentum", trend: "Trend", long_trend: "200-day", volume: "Volume", crowding: "Crowding" };
 
+// When a trade was made: its fill time; or, worked out from the position, the two runs it fell between.
+function tradeWhen(t) {
+  if (t.first_seen) return `Held when tracking began, ${utcTime(t.seen_at)}`;
+  if (t.seen_at && t.after) return `Between ${utcTime(t.after)} and ${utcTime(t.seen_at)}`;
+  return t.time ? utcTime(t.time) : "Opened before the trades read";
+}
+
 // Each trade still open on the exchange: when, how much, the move since, and the score and signals as they
 // stood on the close before it (the same basis as the buy log, so nothing from the trade's own day leaks in).
 function openTrades(p, price) {
@@ -468,7 +475,7 @@ function openTrades(p, price) {
     const then = t.signals;
     const since = finite(t.price) && finite(price) ? sign * (price / t.price - 1) : null;
     const head = h("div", { class: "trade__head" },
-      h("span", { class: "trade__when", text: t.time ? utcTime(t.time) : "Opened before the fills read" }),
+      h("span", { class: "trade__when", text: tradeWhen(t) }),
       h("span", { text: `${fixed(Math.abs(t.size), 4)} ETH` + (finite(t.price) ? ` at ${usd(t.price)}` : "") }),
       since === null ? null : h("span", {}, delta(since, `${signedPct(since)} since`)));
     if (!then) return h("li", { class: "trade" }, head, h("div", { class: "muted sub-line", text: "No signal record: the trade's time is not known." }));
@@ -490,7 +497,12 @@ function openTrades(p, price) {
     p.trades_complete === false ? h("p", { class: "note", text:
       "The trades read do not reach back to when this position was opened; the first row is the part opened before them." }) : null,
     p.trades_source === "filled orders" ? h("p", { class: "note", text:
-      "Read from your filled orders: Coinbase's fills list does not include this market." }) : null);
+      "Read from your filled orders: Coinbase's fills list does not include this market." }) : null,
+    p.trades_source === "observed" ? h("p", { class: "note", text:
+      `Coinbase's API gives no trade history for ${p.product ?? "this market"}, so each trade here is worked out from your ` +
+      "position between the daily runs: dated by the two runs it fell between and priced from the change in Coinbase's " +
+      "average entry. Its signals are those of the close before the earlier run. A position already held when this " +
+      "tracking began counts as one trade, with the signals of the close before that first run." }) : null);
 }
 
 // ---- the signal score -----------------------------------------------------------------------------

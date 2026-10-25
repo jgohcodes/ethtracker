@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, coinbase, combo, config, cycles, decisions, derivs, dipbuy, indicators, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
+from . import advice, alerts, coinbase, combo, config, cycles, decisions, derivs, dipbuy, indicators, observed, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -871,6 +871,23 @@ def _exchange_account() -> dict | None:
         return None
 
 
+def _observe(base: str, token: str, account: dict) -> str | None:
+    """Fold this run's exchange positions into the stored record and give each position whose trade history the
+    API does not return the trades worked out from it. Returns the record to store, or None if it cannot be read."""
+    try:
+        state = observed.load(snapshot.get_state(base, token, "trades"))
+    except DataError as exc:  # names no account detail: the message could carry the dashboard's address
+        print(f"warning: stored exchange positions unavailable ({exc.__class__.__name__})", file=sys.stderr)
+        return None
+    observed.update(state, account.get("positions") or [], datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    for p in account.get("positions") or []:
+        if not p.get("trades_source"):
+            trades = observed.open_trades(state, p["product"])
+            if trades:
+                p["trades"], p["trades_source"], p["trades_complete"] = trades, "observed", True
+    return observed.dump(state)
+
+
 def cmd_account_check(args, ctx: Ctx) -> int:
     """Which Coinbase endpoints the key can read, as shapes only: safe for the public daily-job logs."""
     key = coinbase.env_key()
@@ -1000,8 +1017,10 @@ def cmd_cloud_run(args, ctx: Ctx) -> int:
         provider = _provider(args, ctx)
         price, df = provider.spot(), provider.candles(args.days)
         publisher = "github-actions" if os.environ.get("GITHUB_ACTIONS") == "true" else "cloud-run"
+        context = _market_context(ctx, provider)
+        trades_doc = _observe(base, token, context["account"]) if base and context.get("account") else None
         snap = snapshot.build(ctx.cfg, journal, df, price, derivs_df, source=provider.name, basis="close",
-                              refresh_seconds=snapshot.DAY_SECONDS, publisher=publisher, **_market_context(ctx, provider))
+                              refresh_seconds=snapshot.DAY_SECONDS, publisher=publisher, **context)
         print(snapshot.public_summary(snap))
         if not args.dry_run:
             print("journal: " + ("pulled from the dashboard" if journal_text is not None
@@ -1016,6 +1035,12 @@ def cmd_cloud_run(args, ctx: Ctx) -> int:
         if recorded:
             snapshot.put_state(base, token, "derivs", snapshot.tail_csv(history_path.read_text(), DERIVS_HISTORY_ROWS))
         print("published the snapshot" + (" and the derivatives history" if recorded else ""))
+        if trades_doc is not None:
+            try:
+                snapshot.put_state(base, token, "trades", trades_doc)
+                print("stored the exchange position for tomorrow's trade detection")
+            except DataError as exc:  # a dashboard deployed before the "trades" state existed refuses it
+                print(f"warning: exchange position not stored ({exc.__class__.__name__}); redeploy the dashboard", file=sys.stderr)
     return 0
 
 

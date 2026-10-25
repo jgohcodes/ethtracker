@@ -5,7 +5,7 @@
 //
 //   POST /api/ingest              Authorization: Bearer $INGEST_TOKEN    (your machine and the daily job)
 //   GET  /api/snapshot            Authorization: Bearer $DASHBOARD_TOKEN (the browser)
-//   GET|PUT /api/state?name=...   Authorization: Bearer $INGEST_TOKEN    (journal, derivs: the daily job's memory)
+//   GET|PUT /api/state?name=...   Authorization: Bearer $INGEST_TOKEN    (journal, derivs, trades: the daily job's memory)
 //
 // Two tokens on purpose: the browser's read token can neither overwrite what the dashboard shows nor read
 // the raw journal, and the write token never reaches a browser.
@@ -18,7 +18,8 @@ const MAX_BYTES = 256 * 1024;
 const TTL_SECONDS = 7 * 24 * 3600; // a snapshot nobody refreshed for a week disappears instead of lingering
 const MAX_POSITIONS = 50;
 const MAX_SIGNALS = 100;
-const STATE_LIMITS = { journal: 256 * 1024, derivs: 768 * 1024 }; // bytes of content per state document
+// bytes of content per state document; trades: the exchange position the job saw last, to date the next trade
+const STATE_LIMITS = { journal: 256 * 1024, derivs: 768 * 1024, trades: 128 * 1024 };
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -163,8 +164,9 @@ function createHandlers({ getRedis, env = process.env, now = () => new Date() })
     return send(res, 200, { ok: true, received_at: stored.received_at });
   }
 
-  // The daily job's memory: your journal (pushed by `ethtracker publish`) and the derivatives history it
-  // accumulates. Write-token only, an allowlist of names, a size cap each, and no expiry.
+  // The daily job's memory: your journal (pushed by `ethtracker publish`), the derivatives history it
+  // accumulates and the exchange position it last saw. Write-token only, an allowlist of names, a size cap
+  // each, and no expiry.
   async function state(req, res) {
     if (req.method !== "GET" && req.method !== "PUT") return send(res, 405, { error: "method not allowed" }, { Allow: "GET, PUT" });
     if (!env.INGEST_TOKEN) return send(res, 500, { error: "INGEST_TOKEN is not configured" });

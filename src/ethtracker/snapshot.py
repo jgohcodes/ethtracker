@@ -33,7 +33,7 @@ VERSION = 1
 RECENT_CLOSED = 5
 DAY_SECONDS = 86_400
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
-STATE_NAMES = ("journal", "derivs")
+STATE_NAMES = ("journal", "derivs", "trades")
 BASES = ("close", "live")
 
 
