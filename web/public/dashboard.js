@@ -384,6 +384,52 @@ function renderOdds(s) {
     h("p", { class: "note", text: "Information, not instructions: under the adding plan these never change the weekly add." }));
 }
 
+// ---- the exchange's own view of the position ---------------------------------------------------------
+
+function renderAccount(s) {
+  const a = s.account;
+  $("account-card").hidden = !a;
+  if (!a) { $("account").replaceChildren(); return; }
+  const floor = s.plan?.floor;
+  const estimate = s.plan?.liq_price;
+  const when = (a.fetched_at ?? "").replace("T", " ").replace("Z", " UTC");
+  const positions = (a.positions ?? []).map((p) => {
+    const liq = p.liquidation;
+    const vsFloor = finite(liq) && finite(floor)
+      ? (liq > floor * 1.001 ? badge("critical", "✕", "Above your floor") : badge("good", "✓", "At or under your floor")) : null;
+    const gap = finite(liq) && finite(estimate) && estimate > 0 ? liq - estimate : null;
+    return h("div", { class: "group" },
+      h("div", { class: "lead" }, h("h3", { text: `${p.product ?? "ETH perpetual"}: ${p.side} ${fixed(Math.abs(p.size ?? NaN), 4)} ETH` }), vsFloor),
+      h("div", { class: "metrics" },
+        metric("Entry (average)", usd(p.entry)),
+        metric("Mark", usd(p.mark)),
+        metric("Liquidation, per Coinbase", usd(liq)),
+        gap === null ? null : metric("Versus this tool's estimate", `${gap >= 0 ? "+" : "−"}${usd(Math.abs(gap))}`),
+        metric("Open PnL", delta(p.unrealized, signedUsd(p.unrealized))),
+        p.leverage === null || p.leverage === undefined ? null : metric("Leverage", `${fixed(p.leverage, 2)}x`),
+        p.notional === null || p.notional === undefined ? null : metric("Position value", usd(p.notional, 0))));
+  });
+  const sm = a.summary;
+  const summary = sm ? h("div", { class: "metrics" },
+    sm.collateral === null || sm.collateral === undefined ? null : metric("Collateral", usd(sm.collateral)),
+    sm.liquidation_buffer === null || sm.liquidation_buffer === undefined ? null : metric("Liquidation buffer", usd(sm.liquidation_buffer)),
+    sm.unrealized === null || sm.unrealized === undefined ? null : metric("Open PnL, all", delta(sm.unrealized, signedUsd(sm.unrealized)))) : null;
+  const fills = (a.fills ?? []).length ? h("div", {},
+    h("h3", { class: "sub", text: "Recent ETH perpetual fills" }),
+    h("div", { class: "scroll" }, h("table", { class: "tbl" },
+      h("thead", {}, h("tr", {}, ["Time (UTC)", "Side", "ETH", "Price", "Fee"].map((t, i) => h("th", { class: i > 1 ? "num" : "", text: t })))),
+      h("tbody", {}, a.fills.map((f) => h("tr", {},
+        h("td", { text: (f.time ?? "").slice(0, 16).replace("T", " ") }), h("td", { text: f.side }),
+        h("td", { class: "num", text: fixed(f.size, 4) }), h("td", { class: "num", text: usd(f.price) }),
+        h("td", { class: "num", text: usd(f.fee) }))))))) : null;
+  fill($("account"),
+    positions.length ? positions : h("p", { class: "muted", text:
+      "Coinbase's API returned no ETH perpetual position. If you hold one, it may sit on the Deribit-powered venue this key cannot see yet." }),
+    summary, fills,
+    h("p", { class: "note", text: `Read from Coinbase with your view-only key at ${when}. These are the exchange's own numbers; ` +
+      "where they differ from this tool's, trust these and tell me the gap so the plan's margin rate can be corrected." }));
+}
+
 // ---- the signal score -----------------------------------------------------------------------------
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -604,6 +650,7 @@ function render(s) {
   renderHeader(s);
   renderKpis(s);
   renderPlan(s);
+  renderAccount(s);
   renderScore(s);
   renderFloorRisk(s);
   renderMarket(s);
@@ -670,7 +717,7 @@ function init() {
   $("signout").addEventListener("click", () => {
     setToken(null);
     snap = null;
-    for (const id of ["kpis", "plan", "score", "floor-risk", "market", "odds", "positions", "signals", "ladder", "closed", "chart"]) $(id).replaceChildren();
+    for (const id of ["kpis", "plan", "account", "score", "floor-risk", "market", "odds", "positions", "signals", "ladder", "closed", "chart"]) $(id).replaceChildren();
     mountedTheme = null;
     showLogin();
   });

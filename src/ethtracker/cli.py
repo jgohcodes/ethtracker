@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, combo, config, cycles, decisions, derivs, dipbuy, indicators, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
+from . import advice, alerts, coinbase, combo, config, cycles, decisions, derivs, dipbuy, indicators, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -599,6 +599,43 @@ def cmd_dip_study(args, ctx: Ctx) -> int:
     return 0
 
 
+def cmd_cap_study(args, ctx: Ctx) -> int:
+    asset, full, cfg, funding8h = _asset_history(args, ctx, "the floor plan with a cap on new cash's leverage, fixed "
+                                                            "or set by the signal score")
+    study = dipbuy.Study(full, swing.daily_funding(full, cfg, funding8h), plan.PLAN_MMR, cfg.taker_fee_rate)
+    sc = score.combine(score.states(cfg, full, funding8h)).fillna(0.0).to_numpy()
+    caps = {name: (rule(sc) if rule else None) for name, rule in dipbuy.CAP_RULES.items()}
+    since = pd.Timestamp(args.since, tz="UTC") if args.since else None
+    depth = swing.today_depth(full)
+    groups = (("from a start every 4 weeks", pullbacks.regular_starts(full, years=args.years)),
+              (f"from every week {asset} closed {depth:.0%}+ below its high (like today)",
+               cycles.deep_starts(full, depth=depth, years=args.years)))
+    print(f"Weekly deposits, the floor {dipbuy.FLOOR_UNDER:.0%} under each window's first close and reset after a breach; "
+          f"maintenance margin {plan.PLAN_MMR:.0%}. The score is the dashboard's, read each day from that day's close.")
+    if since is not None:
+        print(f"Only windows starting {since:%Y-%m-%d} or later.")
+    for title, starts in groups:
+        starts = [d for d in starts if since is None or d >= since]
+        if not starts:
+            continue
+        print()
+        print(f"{args.years}-year windows {title}: {len(starts)} windows. Final equity per unit put in")
+        print(f"  {'sizing':<30} {'median':>7} {'above 1x':>9} {'beat spot':>10} {'liquidated':>11} {'worst':>6} {'peak lev':>9}")
+        spot = [study.pair(d, args.years, spot=True).weekly.multiple for d in starts]
+        print(f"  {'spot, no leverage':<30} {np.median(spot):>6.2f}x {np.mean(np.array(spot) > 1):>9.0%} {'':>10} "
+              f"{0:>11.0%} {min(spot):>6.2f} {1.0:>9.1f}")
+        for name, cap in caps.items():
+            runs = [dipbuy.capped(study, d, args.years, dipbuy.FLOOR_UNDER, cap) for d in starts]
+            m = np.array([r.multiple for r in runs])
+            print(f"  {'floor plan, ' + name:<30} {np.median(m):>6.2f}x {np.mean(m > 1):>9.0%} {np.mean(m > np.array(spot)):>10.0%} "
+                  f"{np.mean([r.liquidations > 0 for r in runs]):>11.0%} {m.min():>6.2f} "
+                  f"{np.median([r.peak_leverage for r in runs]):>9.1f}")
+    print()
+    print("beat spot: windows where the plan ended ahead of buying spot every week. liquidated: windows with at least one "
+          "breach. peak lev: median of each window's highest position / equity.")
+    return 0
+
+
 ENTRY_FLOORS = (0.40, 0.50)  # floors under the entry close, generic for public logs
 
 
@@ -823,10 +860,34 @@ def _recent_funding(ctx: Ctx, instrument: str) -> pd.Series | None:
     return series
 
 
+def _exchange_account() -> dict | None:
+    """Your Coinbase position and fills, if COINBASE_API_KEY_JSON is set; None (with a warning that names no account
+    detail) if it is set but cannot be read."""
+    try:
+        key = coinbase.env_key()
+        return coinbase.account(coinbase.Client(key)) if key else None
+    except (DataError, ValueError) as exc:
+        print(f"warning: exchange account unavailable ({exc.__class__.__name__}: {coinbase._scrub(str(exc))})", file=sys.stderr)
+        return None
+
+
+def cmd_account_check(args, ctx: Ctx) -> int:
+    """Which Coinbase endpoints the key can read, as shapes only: safe for the public daily-job logs."""
+    key = coinbase.env_key()
+    if key is None:
+        raise CliError(f"set {coinbase.ENV} to the contents of your view-only CDP API key file")
+    print(f"Coinbase API, {key.alg} key. Shapes only: no amounts, identifiers or counts.")
+    for line in coinbase.probe(coinbase.Client(key)):
+        print(f"  {line}")
+    return 0
+
+
 def _market_context(ctx: Ctx, provider: Provider) -> dict:
-    """Long daily history and a year of funding, for the trend, odds, floor risk and crowding panels."""
+    """Long daily history and a year of funding, for the trend, odds, floor risk and crowding panels, and your
+    exchange account when a key is set."""
     # the inverse perpetual's funding: the history endpoint the studies verified, and a percentile only needs its own year
-    return {"history": provider.candles(CONTEXT_DAYS), "funding8h": _recent_funding(ctx, derivs.HISTORY_INSTRUMENT)}
+    return {"history": provider.candles(CONTEXT_DAYS), "funding8h": _recent_funding(ctx, derivs.HISTORY_INSTRUMENT),
+            "account": _exchange_account()}
 
 
 def _snapshot(args, ctx: Ctx, provider: Provider, price: float, df: pd.DataFrame, derivs_df=None, **kwargs) -> dict:
@@ -1949,6 +2010,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
     sp.add_argument("--horizon", type=int, default=score.HORIZON, help="days ahead to judge each reading on")
+
+    add("account-check", cmd_account_check, "which Coinbase endpoints your view-only key can read (shapes only, no values)")
+
+    sp = add("cap-study", cmd_cap_study, "the floor plan with new cash's leverage capped, fixed or by the signal score")
+    sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
+    sp.add_argument("--years", type=int, default=cycles.HORIZON_YEARS, help="window length in years")
+    sp.add_argument("--since", help="only windows starting on or after this date, e.g. 2021-01-01")
 
     sp = add("dip-study", cmd_dip_study, "add cash weekly, or save it for 20% dips, at 1x, 2.5x, 3x and under the floor plan")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")

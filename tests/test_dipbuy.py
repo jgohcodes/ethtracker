@@ -85,3 +85,24 @@ def test_dip_study_can_keep_only_recent_windows(capsys, tmp_path, monkeypatch):
     since = f"{df.index[800]:%Y-%m-%d}"
     code, text = cli(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "dip-study", "--years", 2, "--since", since)
     assert code == 0 and "Only windows starting" in text and "2-year windows" in text and "to 2020" not in text
+
+
+def test_a_cap_limits_new_cash_leverage_under_the_floor_plan():
+    close = [100.0] * 7 + [90.0] * 8
+    free = go(close, floor=50.0)
+    capped = go(close, floor=50.0, cap=np.full(len(close), 1.0))
+    assert capped.peak_leverage < free.peak_leverage and capped.peak_leverage == pytest.approx(1.0, abs=0.15)
+
+
+def test_cap_study_command(capsys, tmp_path, monkeypatch):
+    df = synthetic_candles(2200, seed=9)
+    out = df.copy()
+    out.insert(0, "date", out.index.strftime("%Y-%m-%d"))
+    out.to_csv(tmp_path / "eth.csv", index=False)
+    monkeypatch.setattr(derivs, "fetch_funding_history",
+                        lambda start, end, **kw: (pd.Series(0.0001, index=pd.date_range(start, end, freq="D", tz="UTC")), 0))
+    code, text = cli(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "cap-study", "--years", 2)
+    assert code == 0
+    for heading in ("spot, no leverage", "floor plan, no cap", "floor plan, 3x cap", "floor plan, score: 3x / 2x / 1x",
+                    "beat spot"):
+        assert heading in text, heading

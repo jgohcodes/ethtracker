@@ -87,6 +87,7 @@ def build(
     publisher: str = "local",
     history: pd.DataFrame | None = None,
     funding8h: pd.Series | None = None,
+    account: dict | None = None,
 ) -> dict:
     """Assemble the snapshot. ``basis="close"`` computes signals on completed daily candles only;
     ``"live"`` folds the current price into today's unfinished candle. Positions are marked at ``price``.
@@ -205,6 +206,7 @@ def build(
         "crowding": plan.crowding(funding8h),
         "odds": plan.odds(context),
         "score": score.block(cfg, context, funding8h, frame, derivs),
+        "account": account,
         "buys": decisions.review(context, journal.decisions, {p.id: p for p in journal.positions}, float(price))
         if journal.decisions else None,
         "config": {

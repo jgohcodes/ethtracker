@@ -41,9 +41,11 @@ class Run:
 
 
 def run(close: np.ndarray, low: np.ndarray, funding_day: np.ndarray, deploy: np.ndarray | None, *, leverage: float | None,
-        floor: float | None, mmr: float, fee: float, reset_under: float | None = None) -> Run:
+        floor: float | None, mmr: float, fee: float, reset_under: float | None = None,
+        cap: np.ndarray | None = None) -> Run:
     """``deploy`` marks the days saved cash goes to work (None: every deposit at once). Exactly one of
-    ``leverage`` and ``floor`` sizes the buys."""
+    ``leverage`` and ``floor`` sizes the buys. ``cap``, per day, limits the leverage the cash being put to work may
+    carry under the floor plan: room the floor allows beyond it stays unused, as margin under the floor."""
     equity = qty = avg = 0.0  # equity: deposits less fees and funding, plus realised losses; excludes open profit
     waiting = paid = 0.0
     liquidations, peak, stopped = 0, 0.0, False
@@ -69,6 +71,8 @@ def run(close: np.ndarray, low: np.ndarray, funding_day: np.ndarray, deploy: np.
                 span = price - floor * (1 - mmr)
                 total = equity + qty * (price - avg)
                 buy = max(0.0, (total - qty * span) / (span + fee * price)) if span > 0 else 0.0
+                if cap is not None:
+                    buy = min(buy, cap[i] * waiting / price)
             if buy > 0:
                 equity -= fee * buy * price
                 avg = (avg * qty + price * buy) / (qty + buy)
@@ -79,6 +83,14 @@ def run(close: np.ndarray, low: np.ndarray, funding_day: np.ndarray, deploy: np.
             peak = max(peak, qty * close[i] / value)
     final = equity + qty * (close[-1] - avg)
     return Run(max(final, 0.0) / paid, liquidations, waiting / paid, peak)
+
+
+CAP_RULES = {
+    "no cap": None,
+    "3x cap": lambda s: np.full(len(s), 3.0),
+    "score: 3x / 2x / 1x": lambda s: np.where(s > 0.2, 3.0, np.where(s >= -0.2, 2.0, 1.0)),
+    "score: 3x, 1x when below 0": lambda s: np.where(s >= 0, 3.0, 1.0),
+}
 
 
 @dataclass(frozen=True)
@@ -111,6 +123,14 @@ class Study:
         kw = dict(leverage=leverage, floor=floor, mmr=0.0 if spot else self.mmr, fee=self.fee,
                   reset_under=under if reset else None)
         return Pair(run(close, low, funding, None, **kw), run(close, low, funding, dips, **kw))
+
+
+def capped(study: "Study", start: pd.Timestamp, years: int, under: float, cap: np.ndarray | None) -> Run:
+    """The floor plan, every week, a new floor after any breach, with new cash's leverage capped day by day."""
+    w = study.window(start, years)
+    close = study.close[w]
+    return run(close, study.low[w], study.funding[w], None, leverage=None, floor=close[0] * (1 - under), mmr=study.mmr,
+               fee=study.fee, reset_under=under, cap=None if cap is None else cap[w])
 
 
 def summary(pairs: list[Pair]) -> dict:

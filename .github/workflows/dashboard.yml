@@ -19,7 +19,7 @@ on:
         type: boolean
         default: false
       studies:
-        description: "Which studies: all, or a list from signals, backtest, cycle, combo, short, swing, trim, pullbacks, timing, entry, score, dips"
+        description: "Which studies: all, or a list from signals, backtest, cycle, combo, short, swing, trim, pullbacks, timing, entry, score, dips, caps, account"
         type: string
         default: all
 
@@ -47,6 +47,7 @@ jobs:
         env:
           ETHTRACKER_DASHBOARD_URL: ${{ secrets.ETHTRACKER_DASHBOARD_URL }}
           ETHTRACKER_INGEST_TOKEN: ${{ secrets.ETHTRACKER_INGEST_TOKEN }}
+          COINBASE_API_KEY_JSON: ${{ secrets.COINBASE_API_KEY_JSON }}
         run: |
           if [ -n "$ETHTRACKER_DASHBOARD_URL" ] && [ -n "$ETHTRACKER_INGEST_TOKEN" ]; then
             ethtracker cloud-run
@@ -54,6 +55,12 @@ jobs:
             echo "::notice title=Dry run::Set the ETHTRACKER_DASHBOARD_URL and ETHTRACKER_INGEST_TOKEN repository secrets to publish. This run fetched live data and published nothing."
             ethtracker cloud-run --dry-run
           fi
+      # Which Coinbase endpoints the view-only key can read: statuses, field names and yes/no only, never values.
+      - name: Account check
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'account')) }}
+        env:
+          COINBASE_API_KEY_JSON: ${{ secrets.COINBASE_API_KEY_JSON }}
+        run: ethtracker account-check
       # The dashboard's market panels as text, from live data: market facts only, never the plan's floor.
       - name: Market context
         run: |
@@ -116,6 +123,13 @@ jobs:
           ethtracker dip-study --asset ETH --days 4000
           echo
           ethtracker dip-study --asset ETH --days 4000 --years 2 --since 2021-01-01
+      # The floor plan with new cash's leverage capped: fixed at 3x, or set by the signal score.
+      - name: Cap study, ETH
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'caps')) }}
+        run: |
+          ethtracker cap-study --asset ETH --days 4000
+          echo
+          ethtracker cap-study --asset ETH --days 4000 --years 2 --since 2021-01-01
       # The signal score: each part's direction and each score bucket against what followed, before and from 2021.
       - name: Score study, ETH
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'score')) }}

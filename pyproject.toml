@@ -7,7 +7,7 @@ name = "ethtracker"
 version = "0.1.0"
 description = "ETH-USD tracker with leveraged position sizing and a risk journal"
 requires-python = ">=3.11"
-dependencies = ["numpy", "pandas", "requests"]
+dependencies = ["numpy", "pandas", "requests", "cryptography"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
