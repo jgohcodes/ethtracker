@@ -43,6 +43,11 @@
 
   <main id="app" hidden>
     <section aria-labelledby="h-account"><h2 id="h-account" class="sr">Account</h2><div id="kpis" class="kpis"></div></section>
+    <section aria-labelledby="h-plan" class="card" id="plan-card" hidden><h2 id="h-plan">Adding plan</h2><div id="plan"></div></section>
+    <div class="split split--even">
+      <section aria-labelledby="h-risk" class="card" id="risk-card" hidden><h2 id="h-risk">Floor risk</h2><div id="floor-risk"></div></section>
+      <section aria-labelledby="h-market" class="card" id="market-card" hidden><h2 id="h-market">Market state</h2><div id="market"></div></section>
+    </div>
     <section aria-labelledby="h-positions"><h2 id="h-positions">Positions</h2><div id="positions" class="stack"></div></section>
     <div class="split">
       <section aria-labelledby="h-chart" class="card chartcard">
@@ -54,6 +59,7 @@
         <div id="signals"></div>
       </section>
     </div>
+    <section aria-labelledby="h-odds" class="card" id="odds-card" hidden><h2 id="h-odds">Pullback signals: their real record</h2><div id="odds"></div></section>
     <section aria-labelledby="h-ladder" class="card"><h2 id="h-ladder">Price ladder</h2><div id="ladder"></div></section>
     <section aria-labelledby="h-closed" class="card"><h2 id="h-closed">Recent closed trades</h2><div id="closed"></div></section>
     <footer class="foot" id="foot"></footer>

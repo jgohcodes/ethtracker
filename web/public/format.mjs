@@ -4,7 +4,7 @@
 export const FRESH_SECONDS = 180; // for the 60-second default cadence
 export const STALE_SECONDS = 600; // never call anything stale sooner than this
 
-const finite = (x) => typeof x === "number" && Number.isFinite(x);
+export const finite = (x) => typeof x === "number" && Number.isFinite(x);
 
 function grouped(x, digits) {
   return Math.abs(x).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -25,6 +25,23 @@ export function fixed(x, digits = 2) {
 // Fractions in, percent out: pct(0.0123) is "1.2%".
 export function pct(x, digits = 1) {
   return finite(x) ? `${(x * 100).toFixed(digits)}%` : "n/a";
+}
+
+// Odds: whole percents, but never a bare 0% or 100% for something merely unlikely or likely.
+export function chance(x) {
+  if (!finite(x)) return "n/a";
+  if (x > 0 && x < 0.005) return "<1%";
+  if (x < 1 && x > 0.995) return ">99%";
+  return pct(x, 0);
+}
+
+export function eth(x, digits = 4) {
+  return finite(x) ? `${x.toFixed(digits)} ETH` : "n/a";
+}
+
+// Funding is quoted per 8 hours and is tiny: four decimals of a percent.
+export function funding8h(x) {
+  return finite(x) ? `${(x * 100).toFixed(4)}% / 8h` : "n/a";
 }
 
 export function signedPct(x, digits = 1) {
@@ -81,6 +98,31 @@ export function actionInfo(action) {
   return ACTIONS[action] ?? { tone: "warning", icon: "?", label: String(action) };
 }
 
+// The adding plan: a liquidation price at or under the floor is the plan working; above it needs action.
+export const PLAN_STATUS = {
+  "at the floor": { tone: "good", icon: "✓", label: "At the floor" },
+  "below the floor": { tone: "good", icon: "✓", label: "Under the floor" },
+  "above the floor": { tone: "critical", icon: "✕", label: "Above the floor" },
+  "no position": { tone: "muted", icon: "•", label: "No position yet" },
+};
+
+// Read through the plan's risk: a downtrend and crowded longs make a fall to the floor likelier.
+export const TREND = {
+  Uptrend: { tone: "good", icon: "▲", label: "Uptrend" },
+  Downtrend: { tone: "serious", icon: "▼", label: "Downtrend" },
+  Mixed: { tone: "muted", icon: "•", label: "Mixed" },
+};
+
+export const CROWDING = {
+  "Crowded longs": { tone: "warning", icon: "!", label: "Crowded longs" },
+  Normal: { tone: "muted", icon: "•", label: "Normal" },
+  "Light longs": { tone: "good", icon: "✓", label: "Light longs" },
+};
+
+export function lookup(table, key) {
+  return table[key] ?? { tone: "muted", icon: "?", label: String(key) };
+}
+
 export const biasGlyph = (bias) => (bias > 0 ? "▲" : bias < 0 ? "▼" : "•");
 
 export const MARKET_LEVELS = [
@@ -96,10 +138,15 @@ export function priceLadder(snap) {
   for (const [key, label] of MARKET_LEVELS) {
     if (finite(snap.levels?.[key])) rows.push({ kind: "market", label, price: snap.levels[key] });
   }
+  const plan = snap.plan;
+  if (plan) {
+    rows.push({ kind: "yours", label: "Plan floor", price: plan.floor });
+    if (finite(plan.liq_price) && plan.liq_price > 0) rows.push({ kind: "yours", label: "Liquidation", price: plan.liq_price });
+  }
   for (const p of snap.positions ?? []) {
-    const tag = `#${p.id} ${p.side}`;
+    const tag = p.lots ? "Average" : `#${p.id} ${p.side}`;
     rows.push({ kind: "yours", label: `${tag} entry`, price: p.entry });
-    if (finite(p.stop)) rows.push({ kind: "yours", label: `${tag} stop`, price: p.stop });
+    if (finite(p.stop) && !(plan && p.stop === plan.floor)) rows.push({ kind: "yours", label: `${tag} stop`, price: p.stop });
     if (finite(p.target)) rows.push({ kind: "yours", label: `${tag} target`, price: p.target });
     if (finite(p.suggested_stop)) rows.push({ kind: "yours", label: `${tag} suggested stop`, price: p.suggested_stop });
   }

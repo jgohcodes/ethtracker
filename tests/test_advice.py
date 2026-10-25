@@ -27,11 +27,11 @@ def sig(name, bias=0, risk_flag=False, headline=None, unvalidated=False) -> Sign
     return Signal(name, bias, risk_flag, headline or name, unvalidated)
 
 
-def run(pos, price, signal_list, portfolio_flags=(), cfg=CFG, df=None):
+def run(pos, price, signal_list, portfolio_flags=(), cfg=CFG, df=None, plan_floor=None):
     sigs = SignalSet(price=price, signals=tuple(signal_list), levels={}, notes=())
     status = risk.mark_position(cfg, pos, price, NOW)
     df = indicators.with_price(flat_candles() if df is None else df, price)
-    return advice.assess(cfg, pos, status, sigs, df, portfolio_flags)
+    return advice.assess(cfg, pos, status, sigs, df, portfolio_flags, plan_floor=plan_floor)
 
 
 BULL = [sig("trend", 1, headline="uptrend"), sig("poc", 1, headline="above POC")]
@@ -60,15 +60,15 @@ def test_deep_in_the_money_with_enough_risk_flags_is_an_exit():
     assert a.deep_itm and a.action == "EXIT" and a.risk_flags == 2
 
 
-def test_deep_in_the_money_with_one_risk_flag_sells_half_and_trails():
+def test_deep_in_the_money_with_one_risk_flag_trails_but_does_not_sell():
     a = run(position(), 3360, BULL + RISKY(1))
-    assert a.action == "TAKE_PARTIAL" and a.suggested_fraction == 0.5
+    assert a.action == "TIGHTEN" and a.suggested_fraction == 0.0
     assert a.suggested_stop is not None and 2900 < a.suggested_stop < 3360
 
 
-def test_deep_in_the_money_with_a_bearish_net_score_sells_half_even_without_risk_flags():
+def test_deep_in_the_money_with_a_bearish_net_score_trails():
     a = run(position(), 3360, [sig("trend", -1), sig("poc", -1), sig("rsi", 1)])
-    assert a.net_score == -1 and a.risk_flags == 0 and a.action == "TAKE_PARTIAL"
+    assert a.net_score == -1 and a.risk_flags == 0 and a.action == "TIGHTEN" and a.suggested_fraction == 0.0
 
 
 def test_deep_in_the_money_with_everything_supportive_only_trails():
@@ -78,9 +78,9 @@ def test_deep_in_the_money_with_everything_supportive_only_trails():
     assert a.suggested_stop is not None and a.suggested_stop > 2900
 
 
-def test_in_profit_with_stacking_risk_flags_and_no_support_sells_half():
-    a = run(position(), 3090, [sig("trend", -1)] + RISKY(2))  # +3%, not deep
-    assert not a.deep_itm and a.action == "TAKE_PARTIAL"
+def test_risk_flags_alone_never_sell_part_of_a_position():
+    a = run(position(), 3090, [sig("trend", -1)] + RISKY(2))  # +3%, not deep, flags stacking
+    assert not a.deep_itm and a.action == "TIGHTEN" and a.suggested_fraction == 0.0
 
 
 def test_in_profit_with_a_single_risk_flag_tightens():
@@ -112,7 +112,7 @@ def test_a_short_mirrors_the_long():
     assert deep.deep_itm and deep.action == "EXIT" and deep.move == pytest.approx(0.12)
     assert deep.bull_case[1:] == ("downtrend", "below POC")  # bearish-for-price signals support a short
     against = run(short, 2640, [sig("trend", 1), sig("poc", 1), sig("rsi", -1)])
-    assert against.action == "TAKE_PARTIAL" and against.net_score == -1
+    assert against.action == "TIGHTEN" and against.net_score == -1
     stopped = run(short, 3150, bearish_for_price)
     assert stopped.action == "EXIT"
 
@@ -197,3 +197,16 @@ def test_a_short_trails_above_the_lowest_price_since_entry():
 
 def test_no_trail_without_enough_history_for_an_atr():
     assert advice.trailing_stop(CFG, position(), flat_candles(n=5), 3000.0) is None
+
+
+def test_under_a_plan_the_core_is_held_whatever_the_flags_say():
+    a = run(position(), 3360, [sig("trend", -1)] + RISKY(3), plan_floor=1250.0)
+    assert a.action == "HOLD" and a.suggested_fraction == 0.0 and a.suggested_stop is None
+    assert any("adding plan" in r for r in a.reasons)
+    warned = run(position(), 3360, BULL, plan_floor=1250.0, portfolio_flags=("LIQ_DANGER", "STRESS_BREACH"))
+    assert warned.action == "HOLD" and any("liquidation price" in r for r in warned.reasons)
+
+
+def test_under_a_plan_only_the_floor_ends_a_position():
+    assert run(position(stop=1250.0), 1240, BULL, plan_floor=1250.0).action == "EXIT"
+    assert run(position(), 3010, BULL, plan_floor=1250.0, portfolio_flags=("LIQUIDATED",)).action == "EXIT"

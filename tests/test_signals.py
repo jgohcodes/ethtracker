@@ -200,10 +200,10 @@ def liquidation_frame(spike: bool) -> pd.DataFrame:
     return pd.DataFrame({"long_liq_usd": long_liq, "short_liq_usd": 1_000_000 + rng.normal(0, 50_000, 40)}, index=idx)
 
 
-def test_a_long_liquidation_spike_is_a_capitulation_candidate_flagged_unvalidated():
+def test_a_long_liquidation_spike_is_forced_selling_flagged_unvalidated():
     found, _ = run_derivs(liquidation_frame(spike=True))
     assert found["long_liquidations"].bias == 1 and found["long_liquidations"].unvalidated
-    assert "capitulation" in found["long_liquidations"].headline
+    assert "forced selling" in found["long_liquidations"].headline
     quiet, _ = run_derivs(liquidation_frame(spike=False))
     assert quiet["long_liquidations"].bias == 0
 

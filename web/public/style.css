@@ -173,7 +173,21 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
 .ladder tr[data-kind="mark"] td { font-weight: 650; background: var(--surface-2); }
 .ladder tr[data-kind="yours"] td:first-child::before { content: "◆ "; color: var(--ink-2); font-size: 10px; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tbl td.num, .tbl td.nowrap { white-space: nowrap; }
 .scroll { overflow-x: auto; }
+
+/* plan, floor risk, market state, signal odds */
+@media (min-width: 900px) { .split--even:not(:has(> [hidden])) { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.lead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.lead h3 { font-size: 13px; font-weight: 600; }
+.lead p { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.sub { font-size: 13px; font-weight: 600; margin: 4px 0 6px; }
+.note { font-size: 13px; color: var(--ink-2); margin-top: 10px; max-width: 90ch; }
+.group p + p { margin-top: 4px; }
+.group .lead { margin-bottom: 6px; }
+.odds tr[data-kind="baseline"] td { color: var(--ink-2); background: var(--surface-2); }
+.odds td .badge { font-size: 12px; padding: 0 8px 0 4px; }
+.odds td .badge__icon { width: 15px; height: 15px; font-size: 10px; }
 
 .foot { font-size: 12.5px; color: var(--ink-2); max-width: 80ch; }
 

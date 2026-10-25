@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, combo, config, cycles, derivs, indicators, pullbacks, risk, shorts, signals, snapshot, study, swing
+from . import advice, alerts, combo, config, cycles, derivs, indicators, plan, pullbacks, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -170,6 +170,79 @@ def cmd_equity(args, ctx: Ctx) -> int:
         print("equity not set")
     else:
         print(f"equity {usd(j.equity)}   recorded peak {usd(j.peak_equity)}")
+    return 0
+
+
+def _long_book(ctx: Ctx, price: float) -> tuple[float, float, float | None]:
+    """Total equity (wallet plus open PnL), ETH held long, and the account's liquidation price, at ``price``."""
+    now = datetime.now(timezone.utc)
+    longs = [p for p in ctx.journal.open_positions() if p.side == "long"]
+    statuses = [risk.mark_position(ctx.cfg, p, price, now) for p in longs]
+    total = (ctx.journal.equity or 0.0) + sum(s.unrealized for s in statuses)
+    qty = sum(p.qty for p in longs)
+    liq = risk.account_liquidation_price(total, longs, price, ctx.cfg.maintenance_margin_rate) if longs and total > 0 else None
+    return total, qty, liq
+
+
+def _print_plan(ctx: Ctx, price: float) -> None:
+    total, qty, liq = _long_book(ctx, price)
+    s = plan.sizing(ctx.cfg, ctx.journal.plan, price, total, qty, liq)
+    print(f"Plan: liquidation never above {usd(s['floor'])}; add {usd(s['weekly_add'])} a week. Price {usd(price)}.")
+    print(f"Book: equity {usd(total)}, {qty:.4f} ETH long, liquidation "
+          + (usd(liq) if liq is not None else "none") + f" ({s['status']}).")
+    if s["cap_leverage"] is None:
+        print("Price is at or under the floor: nothing can be added without lifting the liquidation price above it.")
+        return
+    print(f"New cash can carry up to {s['cap_leverage']:.2f}x here. This week's {usd(s['weekly_add'])} buys up to "
+          f"{s['weekly_qty']:.4f} ETH ({usd(s['weekly_notional'])}). Room without new cash: {s['room_qty']:.4f} ETH.")
+    if s["status"] == "above the floor":
+        print(f"Liquidation is above the floor: cut {s['cut_qty']:.4f} ETH, or add {usd(s['margin_needed'])} of margin.")
+
+
+def cmd_plan(args, ctx: Ctx) -> int:
+    j = ctx.journal
+    if args.floor is not None or args.weekly is not None:
+        current = j.plan or {}
+        floor = args.floor if args.floor is not None else current.get("floor")
+        weekly = args.weekly if args.weekly is not None else current.get("weekly_add")
+        if floor is None or weekly is None:
+            raise CliError("the first plan needs both --floor and --weekly")
+        j.set_plan(floor, weekly)
+        j.save()
+    if not j.plan:
+        print("No plan set: ethtracker plan --floor 1250 --weekly 500")
+        return 0
+    _print_plan(ctx, args.price if args.price is not None else _provider(args, ctx).spot())
+    return 0
+
+
+def cmd_add(args, ctx: Ctx) -> int:
+    """Record new cash and the ETH it bought, sized so the liquidation price stays at or below the plan's floor."""
+    j = ctx.journal
+    if not j.plan:
+        raise CliError("set a plan first: ethtracker plan --floor 1250 --weekly 500")
+    cash = j.plan["weekly_add"] if args.usd is None else args.usd
+    price = args.price if args.price is not None else _provider(args, ctx).spot()
+    floor, mmr, fee = j.plan["floor"], ctx.cfg.maintenance_margin_rate, ctx.cfg.taker_fee_rate
+    span = price - floor * (1 - mmr)
+    if span <= 0:
+        raise CliError(f"price {usd(price)} is at or under the floor {usd(floor)}: nothing can be added")
+    total, qty, _ = _long_book(ctx, price)
+    allowed = max(0.0, (total + cash - qty * span) / (span + fee * price))  # the entry fee comes out of equity too
+    buy = allowed if args.qty is None else args.qty
+    if buy <= 0:
+        raise CliError("no room to add: the liquidation price is already at the floor")
+    if buy > allowed * (1 + 1e-9) and not args.force:
+        raise CliError(f"{buy:.4f} ETH would lift the liquidation price above {usd(floor)}; the most is {allowed:.4f} "
+                       "(use --force to record it anyway)")
+    if cash:
+        j.deposit(cash)
+    pos = j.open(side="long", entry=price, qty=buy, leverage=buy * price / cash if cash else price / span,
+                 stop=floor, target=None, mmr=mmr, initial_risk_usd=buy * (price - floor), note=args.note or "plan add")
+    j.save()
+    print(f"Recorded #{pos.id}: {usd(cash)} added, {buy:.4f} ETH bought at {usd(price)} ({usd(buy * price)}).")
+    _print_plan(ctx, price)
+    print("Run `ethtracker publish --once` to update the dashboard.")
     return 0
 
 
@@ -343,6 +416,37 @@ def _record_derivs(ctx: Ctx) -> None:
 DERIVS_HISTORY_ROWS = 2000  # one row a day from the daily job: years of history, bounded
 
 
+CONTEXT_DAYS = 4000  # the trend, the signals' odds and the floor risk are measured over ETH's whole history
+
+
+def _recent_funding(ctx: Ctx, instrument: str) -> pd.Series | None:
+    """About a year of Deribit's daily funding, fetched at most once a day; None (with a warning) if unavailable."""
+    path = ctx.home / "funding" / f"deribit-{instrument}-year.csv"
+    now = datetime.now(timezone.utc)
+    try:
+        if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).date() == now.date():
+            cached = pd.read_csv(path, index_col=0).iloc[:, 0]
+            cached.index = pd.to_datetime(cached.index, utc=True)
+            return cached.astype(float)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        series, _ = derivs.fetch_funding_history(pd.Timestamp(now) - pd.Timedelta(days=366), pd.Timestamp(now), instrument=instrument)
+    except DataError as exc:
+        print(f"warning: funding history unavailable ({exc})", file=sys.stderr)
+        return None
+    series = series.tail(365)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    series.rename("funding_8h").to_csv(path)
+    return series
+
+
+def _market_context(ctx: Ctx, provider: Provider) -> dict:
+    """Long daily history and a year of funding, for the trend, odds, floor risk and crowding panels."""
+    # the inverse perpetual's funding: the history endpoint the studies verified, and a percentile only needs its own year
+    return {"history": provider.candles(CONTEXT_DAYS), "funding8h": _recent_funding(ctx, derivs.HISTORY_INSTRUMENT)}
+
+
 def _snapshot(args, ctx: Ctx, provider: Provider, price: float, df: pd.DataFrame, derivs_df=None, **kwargs) -> dict:
     anchor = pd.Timestamp(args.anchor, tz="UTC") if getattr(args, "anchor", None) else None
     derivs_df = _derivs(args, ctx) if derivs_df is None else derivs_df
@@ -377,7 +481,7 @@ def _derivs_from_text(text: str | None) -> pd.DataFrame | None:
 def cmd_dashboard_json(args, ctx: Ctx) -> int:
     provider = _provider(args, ctx)
     price = args.price if args.price is not None else provider.spot()
-    snap = _snapshot(args, ctx, provider, price, provider.candles(args.days))
+    snap = _snapshot(args, ctx, provider, price, provider.candles(args.days), **_market_context(ctx, provider))
     text = json.dumps(snap, indent=2, allow_nan=False)  # strict JSON: a stray NaN is an error, not a broken page
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -394,15 +498,16 @@ def cmd_publish(args, ctx: Ctx) -> int:
     endpoint = snapshot.ingest_endpoint(base)
     provider = _provider(args, ctx)
     refresh = snapshot.DAY_SECONDS if args.once else int(args.interval)  # after --once, the daily job is the cadence
-    df, candles_at, first = None, float("-inf"), True
+    df, context, candles_at, first = None, {}, float("-inf"), True
     try:
         while True:
             try:
                 price = provider.spot()
                 if df is None or time.monotonic() - candles_at > CANDLE_REFRESH_SECONDS:
                     df, candles_at = provider.candles(args.days), time.monotonic()
+                    context = _market_context(ctx, provider)
                 history = None if args.derivs_csv else _derivs_from_text(snapshot.get_state(base, token, "derivs"))
-                snap = _snapshot(args, ctx, provider, price, df, history, refresh_seconds=refresh, publisher="local")
+                snap = _snapshot(args, ctx, provider, price, df, history, refresh_seconds=refresh, publisher="local", **context)
                 snapshot.publish(endpoint, token, snap)
                 if ctx.journal.path.exists():
                     snapshot.put_state(base, token, "journal", ctx.journal.path.read_text())
@@ -453,7 +558,7 @@ def cmd_cloud_run(args, ctx: Ctx) -> int:
         price, df = provider.spot(), provider.candles(args.days)
         publisher = "github-actions" if os.environ.get("GITHUB_ACTIONS") == "true" else "cloud-run"
         snap = snapshot.build(ctx.cfg, journal, df, price, derivs_df, source=provider.name, basis="close",
-                              refresh_seconds=snapshot.DAY_SECONDS, publisher=publisher)
+                              refresh_seconds=snapshot.DAY_SECONDS, publisher=publisher, **_market_context(ctx, provider))
         print(snapshot.public_summary(snap))
         if not args.dry_run:
             print("journal: " + ("pulled from the dashboard" if journal_text is not None
@@ -1362,6 +1467,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("value", type=float, nargs="?")
 
     add("price", cmd_price, "print the spot price")
+
+    sp = add("plan", cmd_plan, "set or show the adding plan: a liquidation floor and a weekly add")
+    sp.add_argument("--floor", type=float, help="the highest your liquidation price may go, in dollars")
+    sp.add_argument("--weekly", type=float, help="new cash added each week, in dollars")
+    sp.add_argument("--price", type=float, help="price to evaluate at (default: live)")
+
+    sp = add("add", cmd_add, "record new cash and the ETH it bought, sized to keep liquidation at or below the floor")
+    sp.add_argument("--usd", type=float, help="new cash added (default: the plan's weekly add; 0 to use existing room)")
+    sp.add_argument("--price", type=float, help="your fill price (default: live)")
+    sp.add_argument("--qty", type=float, help="ETH actually bought (default: the most the floor allows)")
+    sp.add_argument("--force", action="store_true", help="record a size beyond the floor anyway")
+    sp.add_argument("--note")
 
     sp = add("sync", cmd_sync, "download daily candles into the local cache (later runs fetch only the gap)")
     sp.add_argument("--days", type=int, default=3000)

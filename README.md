@@ -19,6 +19,8 @@ State lives in `~/.ethtracker` (override with `ETHTRACKER_HOME`): `config.toml` 
 | `sync` / `export` | `sync` downloads daily candles into a local cache (later runs fetch only the gap). `export --out eth.csv` writes candles plus SMA 20/50/100/200, RSI, ATR, volatility and volume average for another app. See [Data](#data) |
 | `headroom` | How much more you can add and still survive the stress move, from current equity and holdings. See [The stress rule](#the-stress-rule) |
 | `size` | Sizes a trade from its stop and your remaining headroom, tests it against your rules, prints price scenarios and history (plus a leverage ladder under isolated margin). **Exit code 1 if blocked** |
+| `plan` | Sets or shows the adding plan: a liquidation floor (`--floor`) and a weekly add (`--weekly`). See [The adding plan](#the-adding-plan) |
+| `add` | Records new cash and the ETH it bought, sized so the whole book's liquidation price stays at or under the floor; refuses a bigger size unless `--force` |
 | `open` / `close` | Record a position you took / closed. `open` refuses rule-breaking plans unless `--force` (which is written into the note) |
 | `risk` | Marks open positions to market: PnL, liquidation distance, stop distance, funding accrued, time held, portfolio open risk and drawdown. **Exit code 1 if any flag is raised** |
 | `signals` | Trend, RSI, volatility, anchored VWAP, volume-profile point of control, and (when recorded or supplied) open-interest, funding and liquidation positioning. See [Signals and recommended actions](#signals-and-recommended-actions) |
@@ -110,9 +112,11 @@ Correlated signals share a family and vote once, so "below the 20d, 50d, 200d, b
 | Action | Fires on (first match wins) |
 |---|---|
 | EXIT | stop breached; time stop; book at or near liquidation; deep in the money with at least `exit_risk_flags` (2) risk flags |
-| TAKE_PARTIAL (close 50%, trail the rest) | book outside the stress rule; deep in the money (at least `deep_itm_pct`, 10%) with any risk flag or a bearish net vote; in profit with 2+ risk flags and no net support |
-| TIGHTEN | in profit with any risk flag or a bearish net vote; deep in the money with the bull case intact (trail only) |
+| TAKE_PARTIAL (close 50%, trail the rest) | book outside the stress rule |
+| TIGHTEN | deep in the money (at least `deep_itm_pct`, 10%) or in profit, with any risk flag or a bearish net vote; deep in the money with the bull case intact (trail only) |
 | HOLD | otherwise, including an underwater position whose signals are deteriorating (honour the stop, do not add) |
+
+Risk flags never sell part of a position on their own: in this repository's studies, days with two or more flags were followed by slightly better returns, and cutting on them cost money. Under an adding plan none of this applies: see below.
 
 The suggested stop is a chandelier: `trail_atr_multiple` (3) ATRs behind the best price since entry, or breakeven once a full ATR in profit. It never loosens a stop.
 
@@ -129,6 +133,28 @@ What to trust:
   ```
 - **Expect false exits.** A warning is at best a shift in odds, and each false exit costs upside.
 - **Derivatives data is a snapshot, not a history.** Deribit's public ticker gives the current open interest and funding, so `record` builds the history: funding works immediately, the 24h open-interest change needs 24 hours of recording, and the percentile needs 30 days. There is no complete free liquidation feed (Binance's stream pushes at most one liquidation per symbol per second), so liquidation signals appear only if you pass `--derivs-csv` with `long_liq_usd` / `short_liq_usd` columns from a data vendor. `--derivs-csv` also accepts `open_interest`, `funding_8h` and the other columns from any source, with `time` or `date` as the first column.
+
+## The adding plan
+
+A long built up every week, whose liquidation price is never allowed above a floor you choose. It replaces the swing rules: no stop other than the floor, no time stop, no stress or risk-per-trade limit, and risk flags are information, not instructions.
+
+```
+ethtracker plan --floor 1250 --weekly 500      # once
+ethtracker add --usd 5000 --price <your fill>  # the first buy
+ethtracker add --price <your fill>             # each week: the weekly add, sized to the floor
+ethtracker plan                                # where you stand, at the live price
+```
+
+The maths is the whole-book liquidation of a cross-margined long: equity + q(p − P) = m·q·p. At price P the account can hold at most equity / (P − floor·(1 − m)) ETH, so new cash can carry at most P / (P − floor·(1 − m)) leverage: 2.14x at $2,336 with a $1,250 floor, more the nearer price is to the floor. Buying more than that lifts the liquidation price above the floor; `add` refuses it. A held position's liquidation price does not rise as price rises, so the book de-levers in a rally and every week's cash buys more ETH lower down.
+
+What the dashboard shows under a plan:
+
+- **Adding plan**: whether liquidation is at, under or above the floor (and, if above, how much to sell or deposit); what this week's add buys at the mark; and the same add as a buy order 5%, 9%, 13% and 20% under the mark, with how often such an order filled within 30 days in ETH's history and how often the low then held.
+- **Floor risk**: the fall to the floor, an EWMA volatility forecast, the chance of touching the floor within 30 days and a year (a driftless random walk: no view on direction), and how often a fall that deep followed from days as far under the high as today.
+- **Market state**: trend (50/200-day and 28-day return) and leverage crowding (funding against its own last year). Crowding measures fragility, not timing.
+- **Pullback signals: their real record**: each "the pullback is over" signal with its hit rate, the 95% lower bound, and two baselines (every day, every pullback day). None reaches 80%.
+
+Funding paid and fees are not deducted from the journal's equity; they lift the real liquidation price slowly. Check it against the exchange and correct the wallet with `ethtracker equity <USD>` when they drift apart.
 
 ## Dashboard
 

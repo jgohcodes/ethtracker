@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, FRESH_SECONDS, STALE_SECONDS, ACTIONS, freshnessThresholds, describeInterval,
+  chance, eth, funding8h, PLAN_STATUS, TREND, CROWDING, lookup,
 } from "../public/format.mjs";
 
 test("money formatting groups thousands, signs deltas and survives missing values", () => {
@@ -131,4 +132,38 @@ test("symbol overrides are limited to characters TradingView symbols use", () =>
   for (const bad of ["", "A".repeat(41), 'x"};alert(1)//', "a b", "<script>", null, undefined, 5]) {
     assert.equal(isValidSymbol(bad), false, String(bad));
   }
+});
+
+test("odds never round a small chance to 0% or a near-certainty to 100%", () => {
+  assert.deepEqual([chance(0.000134), chance(0), chance(0.273), chance(0.999), chance(1), chance(null)],
+    ["<1%", "0%", "27%", ">99%", "100%", "n/a"]);
+});
+
+test("ETH sizes and funding rates format and survive missing values", () => {
+  assert.equal(eth(4.57281), "4.5728 ETH");
+  assert.equal(eth(null), "n/a");
+  assert.equal(funding8h(0.0000123), "0.0012% / 8h");
+  assert.equal(funding8h(undefined), "n/a");
+});
+
+test("plan, trend and crowding states each carry a tone, a label and a distinct glyph within their set", () => {
+  for (const table of [TREND, CROWDING]) {
+    const icons = Object.values(table).map((s) => s.icon);
+    assert.equal(new Set(icons).size, icons.length);
+  }
+  assert.equal(PLAN_STATUS["above the floor"].tone, "critical");
+  assert.equal(PLAN_STATUS["at the floor"].tone, "good");
+  assert.deepEqual(Object.keys(PLAN_STATUS).sort(), ["above the floor", "at the floor", "below the floor", "no position"]);
+  assert.deepEqual(lookup(TREND, "Sideways"), { tone: "muted", icon: "?", label: "Sideways" });
+});
+
+test("under a plan the ladder shows the floor and the liquidation once, not each buy's stop", () => {
+  const snap = {
+    price: 2336,
+    levels: {},
+    plan: { floor: 1250, liq_price: 1248.8 },
+    positions: [{ id: 1, side: "long", entry: 2300, stop: 1250, target: null, suggested_stop: null, lots: [{}, {}] }],
+  };
+  const labels = priceLadder(snap).map((row) => row.label);
+  assert.deepEqual(labels, ["Mark", "Average entry", "Plan floor", "Liquidation"]);
 });

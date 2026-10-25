@@ -184,13 +184,13 @@ def _technical(cfg: Config, df: pd.DataFrame, anchor: pd.Timestamp | None, signa
         if row["ext_hot"]:
             signals.append(Signal("extension", -1, True, f"Stretched: {z:+.1f} std devs above the 20d mean"))
         elif z <= -cfg.extension_z:
-            signals.append(Signal("extension", 1, False, f"Washed out: {z:+.1f} std devs below the 20d mean"))
+            signals.append(Signal("extension", 1, False, f"Far below the 20d mean: {z:+.1f} std devs"))
         else:
             signals.append(Signal("extension", 0, False, f"Not stretched: {z:+.1f} std devs from the 20d mean"))
     rsi = _f(row["rsi"])
     if rsi is not None:
         bias = -1 if rsi >= cfg.rsi_overbought else (1 if rsi <= cfg.rsi_oversold else 0)
-        word = {-1: "overbought", 1: "oversold", 0: "neutral"}[bias]
+        word = {-1: f"at or over {cfg.rsi_overbought:.0f}", 1: f"at or under {cfg.rsi_oversold:.0f}", 0: "neutral"}[bias]
         signals.append(Signal("rsi", bias, bool(row["rsi_hot"]), f"RSI {rsi:.0f}: {word}"))
         peak = _f(row["rsi_peak"])
         if peak is not None and peak >= cfg.rsi_overbought and rsi < peak - ROLLOVER_POINTS:
@@ -308,7 +308,7 @@ def _derivatives(cfg: Config, derivs: pd.DataFrame | None, price_change: float |
         z = (float(daily.iloc[-1]) - float(history.mean())) / std
         spike = z >= cfg.liq_spike_z
         if label == "Long":
-            text = f"Long liquidations spiked (z = {z:.1f}): capitulation candidate" if spike else f"Long liquidations normal (z = {z:.1f})"
+            text = f"Long liquidations spiked (z = {z:.1f}): forced selling" if spike else f"Long liquidations normal (z = {z:.1f})"
             signals.append(Signal("long_liquidations", 1 if spike else 0, False, text, True))
         else:
             text = f"Short liquidations spiked (z = {z:.1f}): a squeeze is under way, momentum but exhaustion risk" if spike else f"Short liquidations normal (z = {z:.1f})"

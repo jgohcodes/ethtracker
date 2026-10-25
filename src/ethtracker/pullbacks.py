@@ -154,12 +154,12 @@ class Rung:
     higher_365: float
 
 
-def ladder(df: pd.DataFrame, depths=LADDER, days: int = BID_DAYS) -> list[Rung]:
-    """From every pullback day: an order ``depth`` under the close, good for ``days``. How often it filled,
-    and how often the low then held and the price was higher 90 and 365 days on."""
+def ladder(df: pd.DataFrame, depths=LADDER, days: int = BID_DAYS, placed_on: np.ndarray | None = None) -> list[Rung]:
+    """From every pullback day (or every ``placed_on`` day): an order ``depth`` under the close, good for ``days``.
+    How often it filled, and how often the low then held and the price was higher 90 and 365 days on."""
     close, low, open_ = (df[c].to_numpy(float) for c in ("close", "low", "open"))
     n = len(close)
-    pull = in_pullback(df)
+    pull = in_pullback(df) if placed_on is None else np.asarray(placed_on, dtype=bool)
     placed = [i for i in np.flatnonzero(pull) if i + days < n]
     episodes = int(swing._first(pull)[: placed[-1] + 1].sum()) if placed else 0
     out = []

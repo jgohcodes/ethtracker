@@ -233,11 +233,11 @@ def test_advise_exits_a_position_through_its_stop_with_both_cases(capsys, funded
     assert "why: Stop" in out and "Bull case" in out and "Bear case" in out
 
 
-def test_advise_takes_profit_on_a_deep_in_the_money_position_when_signals_are_bearish(capsys, funded, candles_csv):
+def test_advise_trails_a_deep_in_the_money_position_when_signals_are_bearish(capsys, funded, candles_csv):
     open_long(capsys, 250)  # csv price ~$292 is ~17% above entry; the synthetic tape is in a downtrend
     code, out = run(capsys, "--provider", "csv", "--csv", candles_csv, "advise")
-    assert code == 1
-    assert "ACTION: TAKE_PARTIAL  (close 50%)" in out or "ACTION: EXIT" in out
+    assert ("ACTION: TIGHTEN" in out and code == 0) or ("ACTION: EXIT" in out and code == 1)
+    assert "TAKE_PARTIAL" not in out  # flags alone never sell part of a position
     assert "Deep in the money" in out
 
 
@@ -310,7 +310,7 @@ def test_watch_announces_an_action_change_once_not_on_every_poll(capsys, monkeyp
     assert code == 0
     assert out.count("ACTION CHANGE") == 1  # HOLD while underwater, then deep in the money
     change = next(line for line in out.splitlines() if "ACTION CHANGE" in line)
-    assert "HOLD ->" in change and ("TAKE_PARTIAL" in change or "EXIT" in change)
+    assert "HOLD ->" in change and ("TIGHTEN" in change or "EXIT" in change)
     assert "ACTION:" in out and "Bull case" in out and "Bear case" in out
     polls = [line for line in out.splitlines() if line.startswith("  #1 long")]
     assert len(polls) == 3 and polls[0].endswith("-> HOLD") and "->" in polls[2]

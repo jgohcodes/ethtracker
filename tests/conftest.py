@@ -38,3 +38,15 @@ def candles_csv(tmp_path, candles):
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("ETHTRACKER_HOME", str(tmp_path / "home"))
+
+
+@pytest.fixture(autouse=True)
+def no_funding_history_from_the_network(monkeypatch):
+    """Deribit's funding history is a network call; tests that need it install their own fake."""
+    from ethtracker import derivs
+    from ethtracker.data import DataError
+
+    def offline(start, end, **kwargs):
+        raise DataError("no network in tests")
+
+    monkeypatch.setattr(derivs, "fetch_funding_history", offline)

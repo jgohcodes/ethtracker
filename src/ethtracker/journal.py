@@ -22,12 +22,14 @@ class Journal:
         self.peak_equity: float | None = None
         self.next_id = 1
         self.positions: list[Position] = []
+        self.plan: dict | None = None  # {"floor": USD, "weekly_add": USD}: the adding plan, if one is set
         if path.exists():
             raw = json.loads(path.read_text())
             self.equity = raw["equity"]
             self.peak_equity = raw["peak_equity"]
             self.next_id = raw["next_id"]
             self.positions = [Position(**p) for p in raw["positions"]]
+            self.plan = raw.get("plan")
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -37,6 +39,8 @@ class Journal:
             "next_id": self.next_id,
             "positions": [asdict(p) for p in self.positions],
         }
+        if self.plan:
+            payload["plan"] = self.plan
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2))
         os.replace(tmp, self.path)
@@ -56,6 +60,16 @@ class Journal:
     def set_equity(self, equity: float) -> None:
         """Deposits and withdrawals reset the baseline, so the drawdown peak resets with it."""
         self.equity = self.peak_equity = equity
+
+    def deposit(self, amount: float) -> None:
+        """New cash: it raises the wallet and the drawdown peak alike, so it never counts as a gain."""
+        self.equity = (self.equity or 0.0) + amount
+        self.peak_equity = (self.peak_equity or 0.0) + amount
+
+    def set_plan(self, floor: float, weekly_add: float) -> None:
+        if floor <= 0 or weekly_add < 0:
+            raise ValueError("the floor must be above zero and the weekly add zero or more")
+        self.plan = {"floor": float(floor), "weekly_add": float(weekly_add), "set_at": now_iso()}
 
     def open(self, **fields) -> Position:
         pos = Position(id=self.next_id, opened_at=now_iso(), **fields)

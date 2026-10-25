@@ -16,13 +16,14 @@ repository. The snapshot contains your equity and positions, so treat the dashbo
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import pandas as pd
 import requests
 
-from . import advice, indicators, risk, signals
+from . import advice, cycles, indicators, plan, risk, signals
 from .config import Config
 from .data import DataError
 from .journal import Journal
@@ -46,6 +47,25 @@ def _clean(value):
     return value
 
 
+def _plan_book(cfg: Config, statuses: list, floor: float, price: float, now: datetime) -> tuple[list, list[dict]]:
+    """Under an adding plan every weekly buy is its own journal entry, but they are one position: show them
+    as one (average entry, whole size, held since the first buy) with each buy listed under it. Shorts, if
+    any, stay separate."""
+    longs = [st for st in statuses if st.position.side == "long"]
+    first = min(longs, key=lambda st: st.position.opened_at).position
+    qty = sum(st.position.qty for st in longs)
+    cost = sum(st.position.qty * st.position.entry for st in longs)
+    margin = sum(st.position.margin for st in longs)
+    book = replace(first, entry=cost / qty, qty=qty, leverage=cost / margin, stop=floor, target=None,
+                   initial_risk_usd=sum(st.position.initial_risk_usd for st in longs), note=f"{len(longs)} buys")
+    status = replace(risk.mark_position(cfg, book, price, now),
+                     funding_accrued=sum(st.funding_accrued for st in longs))  # each buy pays from its own date
+    lots = [{"id": st.position.id, "opened_at": st.position.opened_at, "qty": st.position.qty,
+             "entry": st.position.entry, "unrealized": st.unrealized, "note": st.position.note}
+            for st in sorted(longs, key=lambda st: st.position.opened_at)]
+    return [status] + [st for st in statuses if st.position.side != "long"], lots
+
+
 def closed_candles(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
     """Only days that have finished (UTC): today's candle is still forming."""
     return df[df.index < pd.Timestamp(now).tz_convert("UTC").normalize()]
@@ -64,9 +84,15 @@ def build(
     basis: str = "close",
     refresh_seconds: int | None = None,
     publisher: str = "local",
+    history: pd.DataFrame | None = None,
+    funding8h: pd.Series | None = None,
 ) -> dict:
     """Assemble the snapshot. ``basis="close"`` computes signals on completed daily candles only;
-    ``"live"`` folds the current price into today's unfinished candle. Positions are marked at ``price``."""
+    ``"live"`` folds the current price into today's unfinished candle. Positions are marked at ``price``.
+
+    ``history`` (years of daily candles) feeds the trend, the odds of the pullback signals and, under an
+    adding plan, the floor risk and the order ladder; without it they use ``df``. ``funding8h`` (about a
+    year of daily funding) places today's funding against its own range."""
     if basis not in BASES:
         raise ValueError(f"basis must be one of {BASES}")
     now = now or datetime.now(timezone.utc)
@@ -75,6 +101,9 @@ def build(
         raise DataError("no completed daily candles to compute signals from")
     frame = closed if basis == "close" else indicators.with_price(df, price)
     sigs = signals.compute(cfg, frame, derivs, anchor)
+    floor = journal.plan["floor"] if journal.plan else None
+    if floor is not None:  # the plan's floor replaces the swing rules: no time stop, no stress or risk-per-trade limits
+        cfg = replace(cfg, max_holding_days=10**9, stress_drop_pct=0.0, max_open_risk_pct=1e9)
     statuses = [risk.mark_position(cfg, p, price, now) for p in journal.open_positions()]
     isolated = cfg.margin_mode == "isolated"
 
@@ -102,14 +131,17 @@ def build(
                 "account_liq_price": port.account_liq_price, "flags": list(port.flags),
             }
 
+    shown, lots = statuses, None
+    if floor is not None and sum(st.position.side == "long" for st in statuses) > 1:
+        shown, lots = _plan_book(cfg, statuses, floor, price, now)
     positions = []
-    for status in statuses:
+    for status in shown:
         p = status.position
-        a = advice.assess(cfg, p, status, sigs, frame, book_flags)
+        a = advice.assess(cfg, p, status, sigs, frame, book_flags, plan_floor=floor)
         positions.append({
             "id": p.id, "side": p.side, "qty": p.qty, "entry": p.entry, "leverage": p.leverage,
             "stop": p.stop, "target": p.target, "opened_at": p.opened_at, "note": p.note,
-            "held_days": status.days_held, "max_days": cfg.max_holding_days,
+            "held_days": status.days_held, "max_days": None if floor is not None else cfg.max_holding_days,
             "mark": status.price, "move": a.move, "unrealized": status.unrealized,
             "dist_to_stop": status.dist_to_stop, "funding_accrued": status.funding_accrued,
             "liq_price": status.liq_price if isolated else None,
@@ -118,6 +150,7 @@ def build(
             "bull": list(a.bull_case), "bear": list(a.bear_case),
             "suggested_stop": a.suggested_stop, "suggested_fraction": a.suggested_fraction,
             "net_score": a.net_score, "risk_flags": a.risk_flags, "deep_itm": a.deep_itm,
+            "lots": lots if lots and p.side == "long" else None,
         })
 
     closed_trades = [
@@ -128,6 +161,17 @@ def build(
         }
         for p in journal.closed_positions()[-RECENT_CLOSED:][::-1]
     ]
+
+    # one venue's flash-crash print never reaches a perp's mark price: the studies drop them, and so does this
+    context, _ = cycles.ignore_flash_prints(closed_candles(history, now) if history is not None else closed)
+    plan_block = risk_block = None
+    if floor is not None:
+        longs = [st for st in statuses if st.position.side == "long"]
+        total = equity_block["total"] if equity_block else 0.0
+        liq = portfolio["account_liq_price"] if portfolio else None
+        plan_block = plan.sizing(cfg, journal.plan, float(price), total, sum(st.position.qty for st in longs), liq,
+                                 plan.ladder_stats(context))
+        risk_block = plan.floor_risk(context, float(price), floor)
 
     last_close = float(closed["close"].iloc[-1])
     snap = {
@@ -153,8 +197,13 @@ def build(
         "votes": sigs.votes(),
         "levels": {key: float(value) for key, value in sigs.levels.items()},
         "notes": list(sigs.notes),
+        "plan": plan_block,
+        "floor_risk": risk_block,
+        "trend": plan.trend(context),
+        "crowding": plan.crowding(funding8h),
+        "odds": plan.odds(context),
         "config": {
-            "margin_mode": cfg.margin_mode, "max_holding_days": cfg.max_holding_days,
+            "margin_mode": cfg.margin_mode, "max_holding_days": None if floor is not None else cfg.max_holding_days,
             "max_open_risk_pct": cfg.max_open_risk_pct,
             "deep_itm_pct": cfg.deep_itm_pct, "exit_risk_flags": cfg.exit_risk_flags,
             "stress_drop_pct": cfg.stress_drop_pct, "funding_hot_8h": cfg.funding_hot_8h,

@@ -9,6 +9,7 @@ from ethtracker import combo, config, derivs, shorts
 from ethtracker.cli import main
 from ethtracker.config import Config
 from ethtracker.data import DataError
+from ethtracker.derivs import fetch_funding_history  # the real one: conftest stubs the module attribute
 
 from tests.conftest import synthetic_candles
 from tests.test_cycles import FREE, cycle_path, flags, path
@@ -36,7 +37,7 @@ def test_funding_history_is_paged_and_averaged_by_day(monkeypatch):
 
     monkeypatch.setattr(derivs, "_get_json", fake)
     monkeypatch.setattr(derivs.time, "sleep", lambda s: None)
-    series, failed = derivs.fetch_funding_history(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-03-01", tz="UTC"))
+    series, failed = fetch_funding_history(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-03-01", tz="UTC"))
     assert failed == 0 and len(calls) == 2  # 60 days in 30-day pages
     assert series.index[0] == pd.Timestamp("2024-01-01", tz="UTC") and len(series) == 60
     assert series.iloc[0] == pytest.approx(0.0001) and series.iloc[1] == pytest.approx(0.0003)
@@ -53,11 +54,11 @@ def test_funding_history_survives_some_failed_pages_but_not_all(monkeypatch):
         return page
 
     monkeypatch.setattr(derivs, "_get_json", flaky)
-    series, failed = derivs.fetch_funding_history(pd.Timestamp("2023-12-01", tz="UTC"), pd.Timestamp("2024-01-30", tz="UTC"))
+    series, failed = fetch_funding_history(pd.Timestamp("2023-12-01", tz="UTC"), pd.Timestamp("2024-01-30", tz="UTC"))
     assert failed == 1 and series.iloc[0] == pytest.approx(0.0002)
     monkeypatch.setattr(derivs, "_get_json", lambda url, params: {"result": []})
     with pytest.raises(DataError, match="no funding history"):
-        derivs.fetch_funding_history(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-10", tz="UTC"))
+        fetch_funding_history(pd.Timestamp("2024-01-01", tz="UTC"), pd.Timestamp("2024-01-10", tz="UTC"))
 
 
 def test_a_malformed_funding_payload_is_a_data_error():

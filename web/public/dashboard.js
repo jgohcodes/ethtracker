@@ -1,6 +1,6 @@
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
-  priceLadder, isValidSymbol, describeInterval,
+  priceLadder, isValidSymbol, describeInterval, finite, chance, eth, funding8h, PLAN_STATUS, TREND, CROWDING, lookup,
 } from "./format.mjs";
 
 const TOKEN_KEY = "ethtracker.viewToken";
@@ -144,7 +144,9 @@ function renderKpis(s) {
     tiles.push(tile("Equity", "Not set", "run `ethtracker equity <USD>`"));
   }
   const p = s.portfolio;
-  if (p) {
+  if (s.plan) {
+    tiles.push(...planTiles(s));
+  } else if (p) {
     tiles.push(tile("Exposure", `${fixed(p.effective_leverage, 2)}x`, `gross ${usd(p.gross_notional, 0)} · net ${signedUsd(p.net_notional, 0)}`));
     const overRisk = p.flags.includes("OPEN_RISK_LIMIT");
     tiles.push(tile("Open risk to stops",
@@ -167,6 +169,25 @@ function renderKpis(s) {
   $("kpis").replaceChildren(...tiles);
 }
 
+function planTiles(s) {
+  const plan = s.plan;
+  const info = lookup(PLAN_STATUS, plan.status);
+  const liq = plan.liq_price;
+  const reachable = finite(liq) && liq > 0;
+  const tiles = [];
+  if (plan.qty > 0) {
+    const p = s.portfolio;
+    tiles.push(tile("Position", eth(plan.qty), p ? `${fixed(p.effective_leverage, 2)}x effective · ${usd(p.gross_notional, 0)}` : ""));
+  }
+  tiles.push(tile("Liquidation",
+    [reachable ? usd(liq) : plan.qty > 0 ? "Not reachable" : "None", badge(info.tone, info.icon, info.label)],
+    `floor ${usd(plan.floor, 0)}${reachable ? ` · ${pct(1 - liq / s.price)} under the mark` : ""}`));
+  tiles.push(plan.cap_leverage === null
+    ? tile("This week's add", "None", "price is at or under the floor")
+    : tile("This week's add", eth(plan.weekly_qty), `${usd(plan.weekly_add, 0)} at up to ${fixed(plan.cap_leverage, 2)}x · ${usd(plan.weekly_notional, 0)}`));
+  return tiles;
+}
+
 function metric(label, value) {
   return h("div", { class: "metric" }, h("div", { class: "metric__label", text: label }), h("div", { class: "metric__value" }, value));
 }
@@ -183,7 +204,20 @@ function caseList(title, items, glyph, empty) {
     rest.length ? h("details", { class: "more" }, h("summary", { text: `${rest.length} more` }), h("ul", { class: "list" }, rest.map(row))) : null);
 }
 
-function positionCard(p) {
+function lotsTable(lots) {
+  return h("details", { class: "more" },
+    h("summary", { text: `${lots.length} buys` }),
+    h("div", { class: "scroll" }, h("table", { class: "tbl" },
+      h("thead", {}, h("tr", {}, ["#", "Date", "ETH", "Price", "Open PnL"].map((t, i) => h("th", { class: i > 1 ? "num" : "", text: t })))),
+      h("tbody", {}, lots.map((lot) => h("tr", {},
+        h("td", { text: String(lot.id) }),
+        h("td", { text: (lot.opened_at ?? "").slice(0, 10) }),
+        h("td", { class: "num", text: fixed(lot.qty, 4) }),
+        h("td", { class: "num", text: usd(lot.entry) }),
+        h("td", { class: "num" }, delta(lot.unrealized, signedUsd(lot.unrealized)))))))));
+}
+
+function positionCard(p, planned) {
   const info = actionInfo(p.action);
   const label = info.label + (p.action === "TAKE_PARTIAL" ? ` ${pct(p.suggested_fraction, 0)}` : "");
   const tags = [`leverage ${fixed(p.leverage, 0)}x`, `net vote ${p.net_score > 0 ? "+" : ""}${p.net_score}`, `${p.risk_flags} risk flag${p.risk_flags === 1 ? "" : "s"}`];
@@ -194,16 +228,19 @@ function positionCard(p) {
   return h("article", { class: "pos", "aria-label": `Position ${p.id}` },
     h("div", { class: "pos__head" },
       h("div", {},
-        h("div", { class: "pos__title", text: `#${p.id} ${p.side.toUpperCase()} ${fixed(p.qty, 4)} ETH @ ${usd(p.entry)}` }),
+        h("div", { class: "pos__title", text: p.lots
+          ? `${p.side.toUpperCase()} ${fixed(p.qty, 4)} ETH @ ${usd(p.entry)} average`
+          : `#${p.id} ${p.side.toUpperCase()} ${fixed(p.qty, 4)} ETH @ ${usd(p.entry)}` }),
         h("div", { class: "pos__tags" }, tags.map((t) => h("span", { class: "tag", text: t })))),
       badge(info.tone, info.icon, label, true)),
     h("div", { class: "metrics" },
       metric("Mark", usd(p.mark)),
       metric("Move from entry", delta(p.move, signedPct(p.move))),
       metric("Open PnL", delta(p.unrealized, signedUsd(p.unrealized))),
-      metric("Stop", `${usd(p.stop)} (${pct(p.dist_to_stop)} away)`),
-      metric("Target", p.target === null ? "none" : usd(p.target)),
-      metric("Held", `${fixed(p.held_days, 1)} / ${p.max_days} days`),
+      metric(planned ? "Floor" : "Stop", `${usd(p.stop)} (${pct(p.dist_to_stop)} away)`),
+      planned ? null : metric("Target", p.target === null ? "none" : usd(p.target)),
+      metric(p.lots ? "Since the first buy" : "Held", p.max_days === null || p.max_days === undefined
+        ? `${fixed(p.held_days, 0)} days` : `${fixed(p.held_days, 1)} / ${p.max_days} days`),
       metric("Funding so far", usd(p.funding_accrued)),
       p.liq_price === null || p.liq_price === undefined ? null : metric("Liquidation", `${usd(p.liq_price)} (${pct(p.dist_to_liq)} away)`)),
     h("div", { class: "advice" },
@@ -214,16 +251,136 @@ function positionCard(p) {
       h("div", { class: "cases" },
         caseList("Bull case", p.bull, "▲", "Nothing supportive right now."),
         caseList("Bear case", p.bear, "▼", "Nothing flagged.")),
-      p.note ? h("div", { class: "muted", text: `Note: ${p.note}` }) : null));
+      p.lots ? lotsTable(p.lots) : p.note ? h("div", { class: "muted", text: `Note: ${p.note}` }) : null));
 }
 
 function renderPositions(s) {
   const root = $("positions");
   if (!s.positions.length) {
-    root.replaceChildren(h("div", { class: "empty", text: "No open positions. Record one with `ethtracker open` and it appears here on the next publish." }));
+    root.replaceChildren(h("div", { class: "empty", text: s.plan
+      ? "No position yet. Record your first buy with `ethtracker add --usd <cash> --price <fill>`, then `ethtracker publish --once`."
+      : "No open positions. Record one with `ethtracker open` and it appears here on the next publish." }));
     return;
   }
-  root.replaceChildren(...s.positions.map(positionCard));
+  root.replaceChildren(...s.positions.map((p) => positionCard(p, Boolean(s.plan))));
+}
+
+function planLine(s) {
+  const plan = s.plan;
+  if (plan.status === "above the floor") {
+    return `Liquidation ${usd(plan.liq_price)} is above your ${usd(plan.floor, 0)} floor. Bring it back before adding: ` +
+      `sell ${eth(plan.cut_qty)} or deposit ${usd(plan.margin_needed, 0)}.`;
+  }
+  if (plan.cap_leverage === null) {
+    return `Price is at or under your ${usd(plan.floor, 0)} floor: nothing can be added without lifting the liquidation price above it.`;
+  }
+  if (plan.status === "no position") {
+    return `No position recorded yet. At ${usd(s.price)}, new cash can carry up to ${fixed(plan.cap_leverage, 2)}x and keep liquidation at ${usd(plan.floor, 0)}.`;
+  }
+  return `Liquidation ${usd(plan.liq_price)} is ${plan.status === "at the floor" ? "at" : "under"} your ${usd(plan.floor, 0)} floor. ` +
+    `This week's ${usd(plan.weekly_add, 0)} buys up to ${eth(plan.weekly_qty)} at the mark.`;
+}
+
+function renderPlan(s) {
+  const plan = s.plan;
+  $("plan-card").hidden = !plan;
+  if (!plan) { $("plan").replaceChildren(); return; }
+  const info = lookup(PLAN_STATUS, plan.status);
+  const basis = s.odds?.in_pullback ? "pullback day (15%+ under the 30-day high, like today)" : "day";
+  const rows = plan.ladder.map((r) => h("tr", {},
+    h("td", { text: `−${pct(r.depth, 0)}` }),
+    h("td", { class: "num", text: usd(r.price, 0) }),
+    h("td", { class: "num", text: r.add_qty > 0 ? fixed(r.add_qty, 4) : "none" }),
+    h("td", { class: "num", text: usd(r.add_notional, 0) }),
+    h("td", { class: "num", text: finite(r.cap_leverage) ? `${fixed(r.cap_leverage, 2)}x` : "n/a" }),
+    h("td", { class: "num", text: chance(r.filled) }),
+    h("td", { class: "num", text: chance(r.held) }),
+    h("td", { class: "num", text: chance(r.higher_365) })));
+  fill($("plan"),
+    h("div", { class: "lead" }, badge(info.tone, info.icon, info.label, true), h("p", { text: planLine(s) })),
+    h("div", { class: "metrics" },
+      metric("Floor", usd(plan.floor, 0)),
+      metric("Weekly add", usd(plan.weekly_add, 0)),
+      metric("New cash can carry", plan.cap_leverage === null ? "nothing" : `${fixed(plan.cap_leverage, 2)}x`),
+      metric("This week at the mark", plan.cap_leverage === null ? "none" : `${eth(plan.weekly_qty)} · ${usd(plan.weekly_notional, 0)}`),
+      metric("Room without new cash", eth(plan.room_qty)),
+      plan.set_at ? metric("Plan set", plan.set_at.slice(0, 10)) : null),
+    h("h3", { class: "sub", text: "If price falls first: this week's add as a buy order under the mark" }),
+    h("div", { class: "scroll" }, h("table", { class: "tbl" },
+      h("thead", {}, h("tr", {}, ["Order", "Price", "ETH", "Notional", "Max lev.", "Filled 30d", "Low held", "Up 1y on"]
+        .map((t, i) => h("th", { class: i ? "num" : "", text: t })))),
+      h("tbody", {}, rows))),
+    h("p", { class: "note", text:
+      `The nearer the floor, the more leverage new cash can carry, so each dollar buys more lower down. ` +
+      `Fill and outcome rates: from every past ${basis} in ETH's history, an order this far under the close, good for 30 days. ` +
+      `"Low held": no further 10% fall within 30 days of the fill. In this repository's studies, adding every week beat ` +
+      `saving cash for a signal in every window tested, and choosing the day within a few days barely changed results: the schedule matters more than the order price.` }));
+}
+
+function renderFloorRisk(s) {
+  const r = s.floor_risk;
+  $("risk-card").hidden = !r;
+  if (!r) { $("floor-risk").replaceChildren(); return; }
+  const fall = finite(r.distance) ? 1 - 1 / (1 + r.distance) : null;
+  const hist = r.history;
+  fill($("floor-risk"),
+    h("div", { class: "metrics" },
+      metric("Fall to the floor", finite(fall) ? `−${pct(fall)}` : "n/a"),
+      metric("Volatility forecast", `${pct(r.vol_forecast, 0)} a year`),
+      metric("30-day realised", `${pct(r.vol_30d, 0)} a year`),
+      metric("Distance", finite(r.sigmas) ? `${fixed(r.sigmas, 2)} one-year σ` : "n/a"),
+      metric("Touch within 30 days", chance(r.touch_30d)),
+      metric("Touch within a year", chance(r.touch_1y))),
+    hist ? h("p", { class: "note", text:
+      `History: from days ${pct(hist.from_depth, 0)} or more under the all-time high (like today), ${hist.starts} start days in ` +
+      `${hist.drawdowns} separate drawdowns. A fall this far followed within a year ${pct(hist.within_1y, 0)} of the time, ` +
+      `within four years ${pct(hist.within_4y, 0)}. ${hist.drawdowns} drawdowns is a small sample: low confidence.` }) : null,
+    h("p", { class: "note", text:
+      "Touch odds: a random walk with no drift at the forecast volatility (RiskMetrics EWMA), so no view on direction. " +
+      "Volatility clusters, so these move with the market. Reaching the floor means liquidation of the whole book." }));
+}
+
+function renderMarket(s) {
+  const t = s.trend, c = s.crowding;
+  $("market-card").hidden = !t && !c;
+  if (!t && !c) { $("market").replaceChildren(); return; }
+  const tr = t ? lookup(TREND, t.label) : null;
+  const cr = c ? lookup(CROWDING, c.label) : null;
+  const side = (above) => (above ? "above" : "below");
+  fill($("market"),
+    t ? h("div", { class: "group" },
+      h("div", { class: "lead" }, h("h3", { text: "Trend" }), badge(tr.tone, tr.icon, tr.label)),
+      h("p", { text: `Close ${usd(t.close, 0)}: ${side(t.above_50)} the 50-day (${usd(t.sma50, 0)}), ${side(t.above_200)} the 200-day (${usd(t.sma200, 0)}); ${signedPct(t.return_28d)} over 28 days.` }),
+      h("p", { class: "note", text: "Trend (time-series momentum) is the return signal with the most out-of-sample support in crypto research. In a downtrend, a fall to the floor is likelier; the weekly add still runs." })) : null,
+    h("div", { class: "group" },
+      h("div", { class: "lead" }, h("h3", { text: "Leverage crowding" }), cr ? badge(cr.tone, cr.icon, cr.label) : h("span", { class: "muted", text: "no data" })),
+      c ? h("p", { text: `Funding ${funding8h(c.funding_8h)}: ${pct(c.percentile, 0)} of the last ${c.days} days were at or below it (median ${funding8h(c.median_8h)}).` })
+        : h("p", { class: "muted", text: "Deribit's funding history was unavailable for this snapshot." }),
+      h("p", { class: "note", text: "High funding means crowded longs: a fall would force more selling. It measures fragility, not timing: in this repository's short study, shorting overheating signals (high funding among them) did worse than holding." })));
+}
+
+function renderOdds(s) {
+  const o = s.odds;
+  $("odds-card").hidden = !o;
+  if (!o) { $("odds").replaceChildren(); return; }
+  const rows = o.signals.map((r) => {
+    let fired = "n/a";
+    if (!r.baseline) fired = r.last_fired === null ? "never" : `${r.days_ago}d ago`;
+    return h("tr", { "data-kind": r.baseline ? "baseline" : r.active ? "active" : "" },
+      h("td", {}, r.name, r.active ? [" ", badge("warning", "!", "Fired")] : null),
+      h("td", { class: "nowrap", text: r.baseline ? "baseline" : fired, title: r.last_fired ?? undefined }),
+      h("td", { class: "num", text: String(r.events) }),
+      h("td", { class: "num", text: finite(r.held) ? `${chance(r.held)} (≥${chance(r.held_low)})` : "n/a" }),
+      h("td", { class: "num", text: chance(r.higher_365) }));
+  });
+  fill($("odds"),
+    h("p", { text: `ETH is ${o.in_pullback ? "" : "not "}in a pullback (${pct(o.pullback_depth, 0)}+ under its 30-day high). ` +
+      `For each signal, how often the low then held: no further ${pct(o.further_fall, 0)} fall within ${o.held_days} days of the close. ` +
+      "Compare each with the baselines. None reaches 80%." }),
+    h("div", { class: "scroll" }, h("table", { class: "tbl odds" },
+      h("thead", {}, h("tr", {}, ["Signal", "Last fired", "Times", "Low held (95% low)", "Up 1y on"].map((t, i) => h("th", { class: i > 1 ? "num" : "", text: t })))),
+      h("tbody", {}, rows))),
+    h("p", { class: "note", text: "Information, not instructions: under the adding plan these never change the weekly add." }));
 }
 
 function signalRow(g) {
@@ -312,8 +469,12 @@ function render(s) {
   showApp();
   renderHeader(s);
   renderKpis(s);
+  renderPlan(s);
+  renderFloorRisk(s);
+  renderMarket(s);
   renderPositions(s);
   renderSignals(s);
+  renderOdds(s);
   renderLadder(s);
   renderClosed(s);
   renderFoot(s);
@@ -374,7 +535,7 @@ function init() {
   $("signout").addEventListener("click", () => {
     setToken(null);
     snap = null;
-    for (const id of ["kpis", "positions", "signals", "ladder", "closed", "chart"]) $(id).replaceChildren();
+    for (const id of ["kpis", "plan", "floor-risk", "market", "odds", "positions", "signals", "ladder", "closed", "chart"]) $(id).replaceChildren();
     mountedTheme = null;
     showLogin();
   });

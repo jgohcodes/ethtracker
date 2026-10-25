@@ -9,11 +9,16 @@ Priority, first match wins (for a long; a short mirrors it):
   2. Whole book at or near liquidation                            -> EXIT
   3. Book outside the stress rule                                 -> TAKE_PARTIAL (cut size)
   4. Deep in the money and >= exit_risk_flags risk flags          -> EXIT
-  5. Deep in the money and any risk flag or bearish net score     -> TAKE_PARTIAL + trail
-  6. In profit, risk flags stacking and no net support            -> TAKE_PARTIAL + trail
-  7. In profit and any risk flag or bearish net score             -> TIGHTEN the stop
-  8. Deep in the money, signals supportive                        -> TIGHTEN (trail)
-  9. Otherwise                                                    -> HOLD
+  5. Deep in the money and any risk flag or bearish net score     -> TIGHTEN (trail)
+  6. In profit and any risk flag or bearish net score             -> TIGHTEN the stop
+  7. Deep in the money, signals supportive                        -> TIGHTEN (trail)
+  8. Otherwise                                                    -> HOLD
+Risk flags never sell part of a position on their own: in this repository's tests, days with two or more
+flags were followed by slightly better returns, and cutting on them cost money (signals-study, short-study).
+
+Under an adding plan (``plan_floor`` set) positions are the plan's core: held while the account's
+liquidation price stays at or below the floor, with no time stop and no flag-based action. Only a price at
+the floor (or a liquidated book) ends them; the floor rule itself is enforced on the whole book by plan.sizing.
 """
 
 from __future__ import annotations
@@ -75,6 +80,7 @@ def assess(
     sigs: SignalSet,
     df: pd.DataFrame,
     portfolio_flags: Sequence[str] = (),
+    plan_floor: float | None = None,
 ) -> Assessment:
     s = _sign(pos.side)
     price = status.price
@@ -104,7 +110,16 @@ def assess(
     reasons: list[str] = []
     action, fraction, wants_trail = "HOLD", 0.0, False
 
-    if "STOP_HIT" in status.flags:
+    if plan_floor is not None:
+        if "LIQUIDATED" in book or "STOP_HIT" in status.flags:
+            action, fraction = "EXIT", 1.0
+            reasons.append(f"Price has reached the {plan_floor:,.0f} floor: the plan's line is crossed")
+        else:
+            reasons.append(f"Core of the adding plan: held while the account's liquidation price stays at or below "
+                           f"{plan_floor:,.0f}. Risk flags and scores are information here, not instructions to sell")
+            if "LIQ_DANGER" in book:
+                reasons.append(f"Price is within {cfg.liq_warn_pct:g}% of the liquidation price")
+    elif "STOP_HIT" in status.flags:
         action, fraction = "EXIT", 1.0
         reasons.append(f"Stop {pos.stop:,.2f} is breached")
     elif "TIME_STOP" in status.flags:
@@ -120,11 +135,9 @@ def assess(
         action, fraction = "EXIT", 1.0
         reasons.append(f"Deep in the money ({move:+.1%}) with {flags_n} risk flags (exit threshold {cfg.exit_risk_flags}): bank it")
     elif deep and (flags_n >= 1 or net < 0):
-        action, fraction, wants_trail = "TAKE_PARTIAL", PARTIAL_FRACTION, True
-        reasons.append(f"Deep in the money ({move:+.1%}) and the tide is turning ({flags_n} risk flag(s), net score {net:+d}): sell half, trail the rest")
-    elif move > 0 and flags_n >= cfg.exit_risk_flags and net <= 0:
-        action, fraction, wants_trail = "TAKE_PARTIAL", PARTIAL_FRACTION, True
-        reasons.append(f"In profit with {flags_n} risk flags stacking and no net support (score {net:+d}): sell half")
+        action, wants_trail = "TIGHTEN", True
+        reasons.append(f"Deep in the money ({move:+.1%}) and signals are softening ({flags_n} risk flag(s), net score {net:+d}): "
+                       "trail the stop. Flags alone have not predicted drawdowns, so this does not sell")
     elif move > 0 and (flags_n >= 1 or net < 0):
         action, wants_trail = "TIGHTEN", True
         reasons.append(f"In profit and signals are softening ({flags_n} risk flag(s), net score {net:+d}): protect the gain")
