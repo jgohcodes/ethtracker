@@ -145,3 +145,12 @@ def test_a_score_made_of_the_future_leads_and_one_made_of_the_past_echoes():
     assert score.echo(close, past, horizons=(7,))[7] > 0.8
     assert score.stale(close, future, ages=(0, 60), horizon=7)[60] < 0.3
     assert score.flips_per_year(pd.Series([1.0, 1.0, -1.0, -1.0, 1.0], index=pd.date_range("2024-01-01", periods=5, freq="182D"))) > 0
+
+
+def test_a_swing_the_score_never_turned_for_is_marked_not_given_a_lag():
+    closes = [100.0, 140.0, 95.0, 90.0, 125.0, 80.0, 70.0]  # top, bottom, a bounce to 125, then lower
+    df = path(closes)
+    bearish = pd.Series([0.5, 0.5, -0.5, -0.5, -0.5, -0.5, -0.5], index=df.index)  # never positive on the bounce
+    rows = score.turns(df["close"], bearish)
+    bounce = [r for r in rows if r["kind"] == "bottom"][0]
+    assert bounce["flip"] is None and bounce["lag"] is None

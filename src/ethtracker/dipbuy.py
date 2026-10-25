@@ -13,9 +13,9 @@ How much each buy opens:
 Funding is paid on the open position every day (Deribit's ETH history from 2019, the config's rate before);
 the taker fee on every buy. Liquidation takes the whole account, cash saved for a dip included, when equity
 falls to the maintenance margin at the day's low (flash prints already removed). Deposits carry on into the
-empty account afterwards; under the floor plan they stay in cash, because a breached floor ends the plan (its
-sizing rule would otherwise buy just above the floor at near-unlimited leverage). Result: final equity / money
-put in.
+empty account afterwards. Under the floor plan a breach either ends the plan, later deposits staying in cash
+(its sizing rule would otherwise buy just above the old floor at near-unlimited leverage), or, with ``reset``,
+starts it again with a new floor the same distance under that day's close. Result: final equity / money put in.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ class Run:
 
 
 def run(close: np.ndarray, low: np.ndarray, funding_day: np.ndarray, deploy: np.ndarray | None, *, leverage: float | None,
-        floor: float | None, mmr: float, fee: float) -> Run:
+        floor: float | None, mmr: float, fee: float, reset_under: float | None = None) -> Run:
     """``deploy`` marks the days saved cash goes to work (None: every deposit at once). Exactly one of
     ``leverage`` and ``floor`` sizes the buys."""
     equity = qty = avg = 0.0  # equity: deposits less fees and funding, plus realised losses; excludes open profit
@@ -51,7 +51,10 @@ def run(close: np.ndarray, low: np.ndarray, funding_day: np.ndarray, deploy: np.
         if qty > 0 and equity + qty * (low[i] - avg) <= mmr * qty * low[i]:
             liquidations += 1
             equity = qty = avg = waiting = 0.0
-            stopped = floor is not None  # a breached floor ends the floor plan: later deposits stay in cash
+            if floor is not None and reset_under is not None:
+                floor = close[i] * (1 - reset_under)  # start again under a new floor
+            else:
+                stopped = floor is not None  # a breached floor ends the floor plan: later deposits stay in cash
         if qty > 0:
             equity -= qty * close[i] * funding_day[i]
         if i % WEEK == 0:
@@ -99,13 +102,14 @@ class Study:
         return slice(i, j)
 
     def pair(self, start: pd.Timestamp, years: int, *, leverage: float | None = None, under: float | None = None,
-             spot: bool = False) -> Pair:
+             spot: bool = False, reset: bool = False) -> Pair:
         w = self.window(start, years)
         close, low, funding, dips = self.close[w], self.low[w], self.funding[w], self.dips[w]
         floor = None if under is None else close[0] * (1 - under)
         if spot:  # coins held outright: no funding, nothing to liquidate
             funding, leverage = np.zeros(len(close)), 1.0
-        kw = dict(leverage=leverage, floor=floor, mmr=0.0 if spot else self.mmr, fee=self.fee)
+        kw = dict(leverage=leverage, floor=floor, mmr=0.0 if spot else self.mmr, fee=self.fee,
+                  reset_under=under if reset else None)
         return Pair(run(close, low, funding, None, **kw), run(close, low, funding, dips, **kw))
 
 

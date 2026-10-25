@@ -466,14 +466,16 @@ function renderScore(s) {
   const lead = h("div", { class: "score__lead" },
     h("div", { class: "score__value" }, h("span", { class: "score__number", text: signedFixed(sc.value) }), badge(info.tone, info.icon, info.label, true)),
     h("div", { class: "score__chart" }, scoreLine(sc.history), h("div", { class: "score__ago" }, ago)));
-  const meaning = cal && cal.same.days ? h("p", { class: "score__meaning", text:
-    `Days scored ${cal.bucket.toLowerCase()} (${signedFixed(cal.range[0], 1)} to ${signedFixed(cal.range[1], 1)}; ${cal.same.days.toLocaleString("en-US")} days ` +
-    `in ${cal.same.episodes} separate stretches since ${cal.from.slice(0, 4)}): ETH was higher ${cal.horizon} days later ${chance(cal.same.higher)} of the time ` +
-    `(median ${signedPct(cal.same.median)}), and fell 10%+ at some point within them ${chance(cal.same.fell)} of the time. ` +
-    `Every day: higher ${chance(cal.all.higher)}, median ${signedPct(cal.all.median)}, fell 10%+ ${chance(cal.all.fell)}.` +
-    (cal.same_recent?.days ? ` Since ${cal.recent_from.slice(0, 4)} alone (${cal.same_recent.days.toLocaleString("en-US")} days scored like this): ` +
-      `higher ${chance(cal.same_recent.higher)}, median ${signedPct(cal.same_recent.median)}, against every day's ` +
-      `${chance(cal.all_recent.higher)} and ${signedPct(cal.all_recent.median)}.` : "") }) : null;
+  // the institutional era leads; the full history follows, because the large early swings skew its averages
+  const recentLine = cal?.same_recent?.days
+    ? `Since ${cal.recent_from.slice(0, 4)}, days scored ${cal.bucket.toLowerCase()} (${signedFixed(cal.range[0], 1)} to ${signedFixed(cal.range[1], 1)}; ` +
+      `${cal.same_recent.days.toLocaleString("en-US")} days in ${cal.same_recent.episodes} separate stretches): ETH was higher ${cal.horizon} days later ` +
+      `${chance(cal.same_recent.higher)} of the time (median ${signedPct(cal.same_recent.median)}) and fell 10%+ within them ${chance(cal.same_recent.fell)} ` +
+      `of the time, against ${chance(cal.all_recent.higher)}, ${signedPct(cal.all_recent.median)} and ${chance(cal.all_recent.fell)} for every day since then. `
+    : "";
+  const meaning = cal && cal.same.days ? h("p", { class: "score__meaning", text: recentLine +
+    `All years since ${cal.from.slice(0, 4)}: higher ${chance(cal.same.higher)}, median ${signedPct(cal.same.median)} ` +
+    `(every day: ${chance(cal.all.higher)}, ${signedPct(cal.all.median)}).` }) : null;
 
   const scored = sc.components.map((c) => h("tr", {},
     h("td", {}, h("div", { text: c.name }), h("div", { class: "sub-line" }, h("span", { class: "tag", text: c.evidence === "failed" ? "failed the check" : `${c.evidence} evidence` }), " ", c.reads)),

@@ -112,7 +112,10 @@ jobs:
       # Adding cash every week or saving it for 20% dips, at 1x, 2.5x, 3x and under the floor plan.
       - name: Dip study, ETH
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'dips')) }}
-        run: ethtracker dip-study --asset ETH --days 4000
+        run: |
+          ethtracker dip-study --asset ETH --days 4000
+          echo
+          ethtracker dip-study --asset ETH --days 4000 --years 2 --since 2021-01-01
       # The signal score: each part's direction and each score bucket against what followed, before and from 2021.
       - name: Score study, ETH
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'score')) }}

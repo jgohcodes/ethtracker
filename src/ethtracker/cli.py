@@ -521,13 +521,19 @@ def cmd_score_study(args, ctx: Ctx) -> int:
               "the new way (negative = before the turn), and how much of the swing was still to come")
         print(f"  {'date':<11} {'turn':<7} {'price':>9} {'flipped':<11} {'lag':>5} {'by then':>8} {'swing':>8} {'still to come':>14}")
         for r in rows:
+            if r["flip"] is None:
+                print(f"  {r['date']:%Y-%m-%d}  {r['kind']:<7} {r['price']:>9,.2f} {'did not turn for this swing':<38}"
+                      f"{r['swing']:>+8.1%}" + ("" if r["complete"] else "  (running)"))
+                continue
             print(f"  {r['date']:%Y-%m-%d}  {r['kind']:<7} {r['price']:>9,.2f} {r['flip']:%Y-%m-%d}  {r['lag']:>4}d "
                   f"{r['at_flip']:>+8.1%} {r['swing']:>+8.1%} {r['left']:>13.0%}" + ("" if r["complete"] else "  (running)"))
         for kind in ("top", "bottom"):
-            done = [r for r in rows if r["kind"] == kind and r["complete"]]
+            done = [r for r in rows if r["kind"] == kind and r["complete"] and r["flip"] is not None]
+            sat = sum(1 for r in rows if r["kind"] == kind and r["flip"] is None)
             if done:
                 print(f"  {kind}s: median lag {np.median([r['lag'] for r in done]):.0f} days; median share of the swing still "
-                      f"to come when the score flipped {np.nanmedian([r['left'] for r in done]):.0%} ({len(done)} turns)")
+                      f"to come when the score flipped {np.nanmedian([r['left'] for r in done]):.0%} ({len(done)} turns"
+                      + (f"; it did not turn at all for {sat} more" if sat else "") + ")")
     today = sc.iloc[-1]
     print()
     print(f"Today: score {today:+.2f} ({score.label(today)}). Parts: "
@@ -537,7 +543,8 @@ def cmd_score_study(args, ctx: Ctx) -> int:
 
 DIP_SIZINGS = (("spot, no leverage", {"spot": True}), ("1x perp", {"leverage": 1.0}), ("2.5x perp", {"leverage": 2.5}),
                ("3x perp", {"leverage": 3.0}),
-               (f"floor {dipbuy.FLOOR_UNDER:.0%} under start", {"under": dipbuy.FLOOR_UNDER}))
+               (f"floor {dipbuy.FLOOR_UNDER:.0%} under start", {"under": dipbuy.FLOOR_UNDER}),
+               ("floor, reset on breach", {"under": dipbuy.FLOOR_UNDER, "reset": True}))
 
 
 def cmd_dip_study(args, ctx: Ctx) -> int:
@@ -548,25 +555,33 @@ def cmd_dip_study(args, ctx: Ctx) -> int:
           f"{plan.PLAN_MMR:.0%}, whole-account liquidation at the day's low; saved cash sits in the account as margin.")
     depth = swing.today_depth(full)
     recent = pd.Timestamp(score.RECENT, tz="UTC")
-    regular = pullbacks.regular_starts(full)
-    deep = cycles.deep_starts(full, depth=depth)
+    since = pd.Timestamp(args.since, tz="UTC") if args.since else None
+    regular = [d for d in pullbacks.regular_starts(full, years=args.years) if since is None or d >= since]
+    deep = [d for d in cycles.deep_starts(full, depth=depth, years=args.years) if since is None or d >= since]
+
+    def eras(starts):
+        if since is not None:
+            return ((f"{since:%Y} on", starts),)
+        return (("all", starts), ("to 2020", [d for d in starts if d < recent]), ("2021 on", [d for d in starts if d >= recent]))
+
+    if since is not None:
+        print(f"Only windows starting {since:%Y-%m-%d} or later (indicators still use the earlier history to warm up).")
     groups = (
-        ("from a start every 4 weeks", regular, (("all", regular), ("to 2020", [d for d in regular if d < recent]),
-                                                 ("2021 on", [d for d in regular if d >= recent])), None),
-        (f"from every week {asset} closed {depth:.0%}+ below its high (like today)", deep, (("all", deep),),
+        ("from a start every 4 weeks", regular, eras(regular), None),
+        (f"from every week {asset} closed {depth:.0%}+ below its high (like today)", deep, eras(deep),
          len(cycles.episodes(deep)) if deep else 0),
     )
     for title, starts, eras, drawdowns in groups:
         if not starts:
             continue
         print()
-        print(f"{cycles.HORIZON_YEARS}-year windows {title}: {len(starts)} windows"
+        print(f"{args.years}-year windows {title}: {len(starts)} windows"
               + (f" in {drawdowns} separate drawdowns" if drawdowns else "")
               + ". One unit deposited every week; final equity per unit put in.")
         print(f"  {'sizing':<24} {'starts':<8} {'n':>3} {'weekly':>7} {'dip':>7} {'dip beat':>9} {'above 1x w/d':>13} "
               f"{'liquidated w/d':>15} {'worst w/d':>12} {'dip idle':>9} {'peak lev w/d':>13}")
         for label, kw in DIP_SIZINGS:
-            pairs = {d: study.pair(d, cycles.HORIZON_YEARS, **kw) for d in starts}
+            pairs = {d: study.pair(d, args.years, **kw) for d in starts}
             for era, subset in eras:
                 if not subset:
                     continue
@@ -1938,6 +1953,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("dip-study", cmd_dip_study, "add cash weekly, or save it for 20% dips, at 1x, 2.5x, 3x and under the floor plan")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
+    sp.add_argument("--years", type=int, default=cycles.HORIZON_YEARS, help="window length in years")
+    sp.add_argument("--since", help="only windows starting on or after this date, e.g. 2021-01-01")
 
     sp = add("entry-study", cmd_entry_study, "put cash to work now or bid lower, when each buy is sized to a liquidation floor")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")

@@ -338,12 +338,18 @@ def turns(close: pd.Series, score: pd.Series, swing: float = SWING) -> list[dict
             flip = idx[-1] + 1 if len(idx) else 0
         else:
             ahead = np.flatnonzero(want.iloc[at:].to_numpy())
-            if not len(ahead):
-                continue
-            flip = at + int(ahead[0])
-        flip_t = score.index[flip]
-        flip_price = float(close.iloc[flip])
+            flip = at + int(ahead[0]) if len(ahead) else None
+        flip_t = score.index[flip] if flip is not None else None
+        flip_price = float(close.iloc[flip]) if flip is not None else None
         nxt = points[k + 1] if k + 1 < len(points) else None
+        prev = points[k - 1] if k > 0 else None
+        if flip_t is None or (nxt and flip_t >= nxt[0]) or (prev and flip_t <= prev[0]):
+            # the score never turned for this swing: it sat out a bounce in a falling market (or a dip in a rising
+            # one), already the right way round for the next turn
+            rows.append({"date": t, "kind": kind, "price": price, "flip": None, "lag": None, "at_flip": None,
+                         "swing": (nxt[2] if nxt else float(close.iloc[-1])) / price - 1, "complete": nxt is not None,
+                         "left": None})
+            continue
         end_price = nxt[2] if nxt else float(close.iloc[-1])
         swing_size = end_price / price - 1
         rows.append({

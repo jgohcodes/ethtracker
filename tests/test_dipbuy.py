@@ -66,3 +66,22 @@ def test_spot_pays_no_funding_and_cannot_be_liquidated():
     pair = study.pair(df.index[0], 1, spot=True)
     assert pair.weekly.liquidations == 0 and pair.dip.liquidations == 0
     assert study.pair(df.index[0], 1, leverage=1.0).weekly.liquidations == 1
+
+
+def test_a_reset_floor_plan_starts_again_under_a_new_floor():
+    close = [100.0] * 7 + [40.0] * 15
+    r = go(close, floor=50.0, reset_under=0.5)
+    assert r.liquidations == 1 and r.idle == 0  # after the breach it buys again, with the floor at 20
+    assert r.multiple == pytest.approx(3 / 4, abs=0.01)  # flat at 40 since: the three later deposits, less nothing
+
+
+def test_dip_study_can_keep_only_recent_windows(capsys, tmp_path, monkeypatch):
+    df = synthetic_candles(2200, seed=9)
+    out = df.copy()
+    out.insert(0, "date", out.index.strftime("%Y-%m-%d"))
+    out.to_csv(tmp_path / "eth.csv", index=False)
+    monkeypatch.setattr(derivs, "fetch_funding_history",
+                        lambda start, end, **kw: (pd.Series(0.0001, index=pd.date_range(start, end, freq="D", tz="UTC")), 0))
+    since = f"{df.index[800]:%Y-%m-%d}"
+    code, text = cli(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "dip-study", "--years", 2, "--since", since)
+    assert code == 0 and "Only windows starting" in text and "2-year windows" in text and "to 2020" not in text
