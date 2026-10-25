@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, combo, config, cycles, decisions, derivs, indicators, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
+from . import advice, alerts, combo, config, cycles, decisions, derivs, dipbuy, indicators, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -501,6 +501,52 @@ def cmd_score_study(args, ctx: Ctx) -> int:
     print()
     print(f"Today: score {today:+.2f} ({score.label(today)}). Parts: "
           + ", ".join(f"{k} {int(v):+d}" for k, v in st.iloc[-1].items() if pd.notna(v)))
+    return 0
+
+
+DIP_SIZINGS = (("spot (1x)", {"leverage": 1.0}), ("2.5x perp", {"leverage": 2.5}), ("3x perp", {"leverage": 3.0}),
+               (f"floor {dipbuy.FLOOR_UNDER:.0%} under start", {"under": dipbuy.FLOOR_UNDER}))
+
+
+def cmd_dip_study(args, ctx: Ctx) -> int:
+    asset, full, cfg, funding8h = _asset_history(args, ctx, "add cash every week, or save it for a 20% dip, on a "
+                                                            "leveraged perp?")
+    study = dipbuy.Study(full, swing.daily_funding(full, cfg, funding8h), plan.PLAN_MMR, cfg.taker_fee_rate)
+    print(f"Dips: the first close 20% under the 30-day high, {int(study.dips.sum())} in the history. Maintenance margin "
+          f"{plan.PLAN_MMR:.0%}, whole-account liquidation at the day's low; saved cash sits in the account as margin.")
+    depth = swing.today_depth(full)
+    recent = pd.Timestamp(score.RECENT, tz="UTC")
+    regular = pullbacks.regular_starts(full)
+    deep = cycles.deep_starts(full, depth=depth)
+    groups = (
+        ("from a start every 4 weeks", regular, (("all", regular), ("to 2020", [d for d in regular if d < recent]),
+                                                 ("2021 on", [d for d in regular if d >= recent])), None),
+        (f"from every week {asset} closed {depth:.0%}+ below its high (like today)", deep, (("all", deep),),
+         len(cycles.episodes(deep)) if deep else 0),
+    )
+    for title, starts, eras, drawdowns in groups:
+        if not starts:
+            continue
+        print()
+        print(f"{cycles.HORIZON_YEARS}-year windows {title}: {len(starts)} windows"
+              + (f" in {drawdowns} separate drawdowns" if drawdowns else "")
+              + ". One unit deposited every week; final equity per unit put in.")
+        print(f"  {'sizing':<24} {'starts':<8} {'n':>3} {'weekly':>7} {'dip':>7} {'dip beat':>9} {'liquidated w/d':>15} "
+              f"{'worst w/d':>12} {'dip idle':>9} {'peak lev w/d':>13}")
+        for label, kw in DIP_SIZINGS:
+            pairs = {d: study.pair(d, cycles.HORIZON_YEARS, **kw) for d in starts}
+            for era, subset in eras:
+                if not subset:
+                    continue
+                sm = dipbuy.summary([pairs[d] for d in subset])
+                print(f"  {label:<24} {era:<8} {sm['windows']:>3} {sm['weekly_median']:>6.2f}x {sm['dip_median']:>6.2f}x "
+                      f"{sm['dip_beat']:>9.0%} {sm['weekly_liquidated']:>7.0%} / {sm['dip_liquidated']:<5.0%} "
+                      f"{sm['weekly_worst']:>5.2f} / {sm['dip_worst']:<5.2f} {sm['dip_idle']:>9.0%} "
+                      f"{sm['weekly_peak_leverage']:>5.1f} / {sm['dip_peak_leverage']:<5.1f}")
+    print()
+    print("weekly / dip: median final equity per unit put in. dip beat: windows where saving for dips ended ahead. "
+          "liquidated: windows with at least one whole-account liquidation. dip idle: cash still waiting at the end. "
+          "peak lev: median of each window's highest position / equity.")
     return 0
 
 
@@ -1854,6 +1900,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
     sp.add_argument("--horizon", type=int, default=score.HORIZON, help="days ahead to judge each reading on")
+
+    sp = add("dip-study", cmd_dip_study, "add cash weekly, or save it for 20% dips, at 1x, 2.5x, 3x and under the floor plan")
+    sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
 
     sp = add("entry-study", cmd_entry_study, "put cash to work now or bid lower, when each buy is sized to a liquidation floor")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
