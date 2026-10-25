@@ -1,7 +1,7 @@
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, describeInterval, finite, chance, eth, funding8h, PLAN_STATUS, TREND, CROWDING, lookup,
-  SCORE, signedFixed, stateWord, stripSummary, reading, lineSummary,
+  SCORE, signedFixed, stateWord, stripSummary, reading, lineSummary, shortDate, utcTime, scoreLabel,
 } from "./format.mjs";
 
 const TOKEN_KEY = "ethtracker.viewToken";
@@ -141,6 +141,8 @@ function renderKpis(s) {
   if (eq) {
     tiles.push(tile("Equity", usd(eq.total), `wallet ${usd(eq.wallet)}`));
     tiles.push(tile("Open PnL", delta(eq.unrealized, signedUsd(eq.unrealized)), eq.wallet ? `${signedPct(eq.unrealized / eq.wallet)} of wallet` : ""));
+  } else if (s.account?.summary) {
+    tiles.push(...exchangeTiles(s));
   } else {
     tiles.push(tile("Equity", "Not set", "run `ethtracker equity <USD>`"));
   }
@@ -168,6 +170,27 @@ function renderKpis(s) {
     }
   }
   $("kpis").replaceChildren(...tiles);
+}
+
+// No journal yet: the top row shows the exchange's own account instead, and says so.
+function exchangeTiles(s) {
+  const sm = s.account.summary;
+  const p = (s.account.positions ?? [])[0];
+  const total = finite(sm.total) ? sm.total : finite(sm.collateral) && finite(sm.unrealized) ? sm.collateral + sm.unrealized : null;
+  const tiles = [
+    tile("Equity, on Coinbase", usd(total), `collateral ${usd(sm.collateral)} · not in your journal yet`),
+    tile("Open PnL, on Coinbase", delta(sm.unrealized, signedUsd(sm.unrealized)),
+      finite(sm.collateral) && sm.collateral > 0 ? `${signedPct(sm.unrealized / sm.collateral)} of collateral` : ""),
+  ];
+  if (p && finite(p.notional) && finite(total) && total > 0) {
+    tiles.push(tile("Leverage, on Coinbase", `${fixed(p.notional / total, 2)}x`, `position ${usd(p.notional, 0)} / equity`));
+  }
+  if (p && finite(p.liquidation) && finite(s.price)) {
+    tiles.push(tile("Liquidation, on Coinbase", usd(p.liquidation),
+      `${pct(Math.abs(1 - p.liquidation / s.price))} ${p.liquidation < s.price ? "below" : "above"} the mark` +
+      (p.liquidation_from === "buffer" ? " · from the buffer" : "")));
+  }
+  return tiles;
 }
 
 function planTiles(s) {
@@ -407,27 +430,61 @@ function renderAccount(s) {
         gap === null ? null : metric("Versus this tool's estimate", `${gap >= 0 ? "+" : "−"}${usd(Math.abs(gap))}`),
         metric("Open PnL", delta(p.unrealized, signedUsd(p.unrealized))),
         p.leverage === null || p.leverage === undefined ? null : metric("Leverage", `${fixed(p.leverage, 2)}x`),
-        p.notional === null || p.notional === undefined ? null : metric("Position value", usd(p.notional, 0))));
+        p.notional === null || p.notional === undefined ? null : metric("Position value", usd(p.notional, 0)),
+        finite(p.entry_score) ? metric("Signal score at entry", scoreValue(p.entry_score)) : null),
+      openTrades(p, s.price));
   });
   const sm = a.summary;
   const summary = sm ? h("div", { class: "metrics" },
     sm.collateral === null || sm.collateral === undefined ? null : metric("Collateral", usd(sm.collateral)),
     sm.liquidation_buffer === null || sm.liquidation_buffer === undefined ? null : metric("Liquidation buffer", usd(sm.liquidation_buffer)),
     sm.unrealized === null || sm.unrealized === undefined ? null : metric("Open PnL, all", delta(sm.unrealized, signedUsd(sm.unrealized)))) : null;
-  const fills = (a.fills ?? []).length ? h("div", {},
-    h("h3", { class: "sub", text: "Recent ETH perpetual fills" }),
-    h("div", { class: "scroll" }, h("table", { class: "tbl" },
-      h("thead", {}, h("tr", {}, ["Time (UTC)", "Side", "ETH", "Price", "Fee"].map((t, i) => h("th", { class: i > 1 ? "num" : "", text: t })))),
-      h("tbody", {}, a.fills.map((f) => h("tr", {},
-        h("td", { text: (f.time ?? "").slice(0, 16).replace("T", " ") }), h("td", { text: f.side }),
-        h("td", { class: "num", text: fixed(f.size, 4) }), h("td", { class: "num", text: usd(f.price) }),
-        h("td", { class: "num", text: usd(f.fee) }))))))) : null;
   fill($("account"),
     positions.length ? positions : h("p", { class: "muted", text:
       "Coinbase's API returned no ETH perpetual position. If you hold one, it may sit on the Deribit-powered venue this key cannot see yet." }),
-    summary, fills,
+    summary,
     h("p", { class: "note", text: `Read from Coinbase with your view-only key at ${when}. These are the exchange's own numbers; ` +
       "where they differ from this tool's, trust these and tell me the gap so the plan's margin rate can be corrected." }));
+}
+
+// A score with its label, as the score card shows it.
+function scoreValue(v) {
+  const info = lookup(SCORE, scoreLabel(v));
+  return h("span", { class: "score-inline" }, h("span", { class: "score-inline__n", text: signedFixed(v) }), badge(info.tone, info.icon, info.label));
+}
+const PART_NAMES = { momentum: "Momentum", trend: "Trend", long_trend: "200-day", volume: "Volume", crowding: "Crowding" };
+
+// Each trade still open on the exchange: when, how much, the move since, and the score and signals as they
+// stood on the close before it (the same basis as the buy log, so nothing from the trade's own day leaks in).
+function openTrades(p, price) {
+  const trades = p.trades ?? [];
+  if (!trades.length) return null;
+  const sign = p.side === "short" ? -1 : 1;
+  const rows = trades.map((t) => {
+    const then = t.signals;
+    const since = finite(t.price) && finite(price) ? sign * (price / t.price - 1) : null;
+    const head = h("div", { class: "trade__head" },
+      h("span", { class: "trade__when", text: t.time ? utcTime(t.time) : "Opened before the fills read" }),
+      h("span", { text: `${fixed(Math.abs(t.size), 4)} ETH` + (finite(t.price) ? ` at ${usd(t.price)}` : "") }),
+      since === null ? null : h("span", {}, delta(since, `${signedPct(since)} since`)));
+    if (!then) return h("li", { class: "trade" }, head, h("div", { class: "muted sub-line", text: "No signal record: the trade's time is not known." }));
+    const parts = then.components.filter((c) => c.weight > 0).map((c) =>
+      h("span", { class: "part", "data-sign": c.state > 0 ? "up" : c.state < 0 ? "down" : "flat" },
+        h("span", { class: "part__glyph", "aria-hidden": "true", text: biasGlyph(c.state ?? 0) }), `${PART_NAMES[c.key] ?? c.name} ${stateWord(c.state)}`));
+    const firing = then.firing.map((g) => h("li", { class: "trade__sig", "data-sign": g.bias > 0 ? "up" : g.bias < 0 ? "down" : "flat" },
+      h("span", { class: "sig__glyph", role: "img", "aria-label": g.bias > 0 ? "bullish" : g.bias < 0 ? "bearish" : "neutral", text: biasGlyph(g.bias) }),
+      h("span", {}, g.headline, g.risk ? h("span", { class: "sig__meta" }, badge("warning", "!", "Risk")) : null)));
+    return h("li", { class: "trade" }, head,
+      h("div", { class: "trade__score" }, h("span", { class: "muted", text: `Score on the ${then.basis_close} close ` }),
+        finite(then.score) ? scoreValue(then.score) : "n/a"),
+      h("div", { class: "trade__parts" }, parts),
+      firing.length ? h("ul", { class: "trade__sigs" }, firing) : h("div", { class: "muted sub-line", text: "No other signal was firing." }));
+  });
+  return h("div", { class: "trades" },
+    h("h3", { class: "sub", text: trades.length === 1 ? "The open trade" : `The ${trades.length} open trades, oldest first` }),
+    h("ul", { class: "trades__list" }, rows),
+    p.trades_complete === false ? h("p", { class: "note", text:
+      "The fills read do not reach back to when this position was opened; the first row is the part opened before them." }) : null);
 }
 
 // ---- the signal score -----------------------------------------------------------------------------
@@ -555,23 +612,80 @@ function trail(row) {
   return h("span", { class: "muted", text: "no data yet" });
 }
 
-function scoreLine(history) {
-  const W = 360, H = 64, pad = 4;
-  const n = history.length;
+// The score against ETH's daily close. Bars are the score on the left axis (the shaded band is neutral); the line
+// is the close on its own right-hand axis. Every day carries a tooltip with both.
+let scoreRange = 90;
+const RANGES = [[90, "3 months"], [365, "1 year"]];
+
+function scorePriceChart(history) {
+  const days = history.slice(-scoreRange);
+  const n = days.length;
   if (n < 2) return null;
-  const x = (i) => pad + (i / (n - 1)) * (W - 2 * pad);
-  const y = (v) => pad + ((1 - v) / 2) * (H - 2 * pad);
-  const points = history.map((p, i) => `${x(i).toFixed(1)},${y(p.score).toFixed(1)}`).join(" ");
-  const marks = [14, 7, 3].filter((b) => b < n).map((b) =>
-    svg("circle", { cx: x(n - 1 - b), cy: y(history[n - 1 - b].score), r: 2.5, class: "spark__mark" }));
-  const last = history[n - 1].score;
-  return svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "spark", role: "img",
-    "aria-label": `Score over the last ${n} days: from ${signedFixed(history[0].score)} to ${signedFixed(last)}` },
-  svg("line", { x1: pad, x2: W - pad, y1: y(0), y2: y(0), class: "spark__zero" }),
-  svg("line", { x1: pad, x2: W - pad, y1: y(0.2), y2: y(0.2), class: "spark__band" }),
-  svg("line", { x1: pad, x2: W - pad, y1: y(-0.2), y2: y(-0.2), class: "spark__band" }),
-  svg("polyline", { points, class: "spark__line" }), marks,
-  svg("circle", { cx: x(n - 1), cy: y(last), r: 4, class: last > 0 ? "spark__now spark__now--pos" : last < 0 ? "spark__now spark__now--neg" : "spark__now" }));
+  const narrow = window.matchMedia("(max-width: 640px)").matches;  // fewer units across, so the labels stay legible
+  const W = narrow ? 380 : 720, H = narrow ? 200 : 190, L = 26, R = 54, T = 8, B = 20;
+  const pw = W - L - R, ph = H - T - B;
+  const step = pw / n;
+  const x = (i) => L + (i + 0.5) * step;
+  const ys = (v) => T + ((1 - v) / 2) * ph;
+  const closes = days.map((d) => d.close).filter(finite);
+  let lo = Math.min(...closes), hi = Math.max(...closes);
+  const pad = (hi - lo || hi || 1) * 0.06;
+  lo -= pad; hi += pad;
+  const yp = (v) => T + ((hi - v) / (hi - lo)) * ph;
+  const bw = Math.max(1, step - (n > 120 ? 0.4 : 1.2));
+  const bars = days.map((d, i) => {
+    const top = Math.min(ys(d.score), ys(0)), height = Math.max(0.6, Math.abs(ys(d.score) - ys(0)));
+    const tone = d.score > 0.2 ? "pos" : d.score < -0.2 ? "neg" : "flat";
+    return svg("rect", { x: (x(i) - bw / 2).toFixed(2), y: top.toFixed(1), width: bw.toFixed(2), height: height.toFixed(1), class: `sp__bar sp__bar--${tone}` });
+  });
+  const line = days.map((d, i) => (finite(d.close) ? `${x(i).toFixed(1)},${yp(d.close).toFixed(1)}` : null)).filter(Boolean).join(" ");
+  const hits = days.map((d, i) => svg("rect", { x: (L + i * step).toFixed(2), y: T, width: step.toFixed(2), height: ph, class: "sp__hit" },
+    svg("title", {}, document.createTextNode(`${d.date}: score ${signedFixed(d.score)}, ETH ${usd(d.close, 0)}`))));
+  const text = (attrs, t) => svg("text", attrs, document.createTextNode(t));
+  const ticks = [0, Math.floor((n - 1) / 2), n - 1].map((i, k) =>
+    text({ x: x(i).toFixed(1), y: H - 5, "text-anchor": k === 0 ? "start" : k === 2 ? "end" : "middle", class: "sp__axis" }, shortDate(days[i].date)));
+  const last = days[n - 1];
+  return svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "sp", role: "img",
+    "aria-label": `Signal score and ETH close over ${n} days: score from ${signedFixed(days[0].score)} to ${signedFixed(last.score)}, ` +
+      `ETH from ${usd(days[0].close, 0)} to ${usd(last.close, 0)}` },
+  svg("rect", { x: L, y: ys(0.2).toFixed(1), width: pw, height: (ys(-0.2) - ys(0.2)).toFixed(1), class: "sp__band" }),
+  svg("line", { x1: L, x2: L + pw, y1: ys(0), y2: ys(0), class: "sp__zero" }),
+  [[1, "+1"], [0, "0"], [-1, "−1"]].map(([v, t]) => text({ x: L - 6, y: (ys(v) + 3.5).toFixed(1), "text-anchor": "end", class: "sp__axis" }, t)),
+  bars,
+  svg("polyline", { points: line, class: "sp__price" }),
+  finite(last.close) ? svg("circle", { cx: x(n - 1).toFixed(1), cy: yp(last.close).toFixed(1), r: 3.2, class: "sp__now" }) : null,
+  priceLabels(closes, last.close, yp, L + pw + 6, T + 9, T + ph).map(([y, t, now]) =>
+    text({ x: L + pw + 6, y: y.toFixed(1), class: now ? "sp__axis sp__axis--now" : "sp__axis" }, t)),
+  ticks, hits);
+}
+
+// The right axis: the period's high and low, and today's close beside its point; a high or low label that
+// would sit on top of today's is dropped.
+function priceLabels(closes, now, yp, x, top, bottom) {
+  const labels = [[top, usd(Math.max(...closes), 0), false], [bottom, usd(Math.min(...closes), 0), false]];
+  if (!finite(now)) return labels;
+  const y = Math.min(bottom, Math.max(top, yp(now) + 3.5));
+  return [...labels.filter(([ly]) => Math.abs(ly - y) >= 12), [y, usd(now, 0), true]];
+}
+
+function scoreChartBlock(history) {
+  const box = h("div", { class: "sp-wrap" });
+  const draw = () => {
+    const buttons = RANGES.filter(([d]) => d <= Math.max(90, history.length)).map(([d, t]) => {
+      const b = h("button", { class: "btn btn--seg", type: "button", "aria-pressed": String(d === scoreRange), text: t });
+      b.addEventListener("click", () => { scoreRange = d; draw(); });
+      return b;
+    });
+    fill(box,
+      h("div", { class: "sp-head" },
+        h("div", { class: "sp-key" },
+          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__bars", "aria-hidden": "true" }), "Signal score (left axis)"),
+          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__line", "aria-hidden": "true" }), "ETH daily close (right axis)")),
+        h("div", { class: "seg", role: "group", "aria-label": "Chart range" }, buttons)),
+      scorePriceChart(history));
+  };
+  draw();
+  return box;
 }
 
 function stateCell(v) {
@@ -592,7 +706,7 @@ function renderScore(s) {
     .map(([k, t]) => h("span", { class: "ago" }, h("span", { class: "muted", text: `${t} ` }), signedFixed(sc.ago[k])));
   const lead = h("div", { class: "score__lead" },
     h("div", { class: "score__value" }, h("span", { class: "score__number", text: signedFixed(sc.value) }), badge(info.tone, info.icon, info.label, true)),
-    h("div", { class: "score__chart" }, scoreLine(sc.history), h("div", { class: "score__ago" }, ago)));
+    h("div", { class: "score__ago" }, ago));
   // the institutional era leads; the full history follows, because the large early swings skew its averages
   const recentLine = cal?.same_recent?.days
     ? `Since ${cal.recent_from.slice(0, 4)}, days scored ${cal.bucket.toLowerCase()} (${signedFixed(cal.range[0], 1)} to ${signedFixed(cal.range[1], 1)}; ` +
@@ -627,8 +741,12 @@ function renderScore(s) {
     "so a line heading for a dashed line is a signal weakening before it turns. Momentum and trend draw a thin second line ",
     "(the 7-day return; the 20-day against the 50-day): their state needs both on the same side of zero. ",
     "An amber ring marks a risk flag that day. Hover a line for its values. \u201cAdds\u201d is each signal's share of today's score.");
+  const overlay = h("div", { class: "score__overlay" }, scoreChartBlock(sc.history),
+    h("p", { class: "note", text: "Read the bars against the line, not as a forecast of it: on ETH's history the score " +
+      "mostly echoes the last few weeks of price (its correlation with the past 28 days' return is about +0.84) and " +
+      "barely leads the next 30 (about +0.10 since 2021). It turns after a top or bottom, typically 1 to 4 weeks late." }));
   fill($("score"),
-    lead, meaning, legend,
+    lead, overlay, meaning, legend,
     h("div", { class: "scroll" }, h("table", { class: "tbl score__table" }, head,
       h("tbody", {}, scored),
       others.length ? h("tbody", { class: "score__unscored" },

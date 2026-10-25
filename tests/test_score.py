@@ -190,3 +190,36 @@ def test_the_block_draws_a_line_for_every_signal_with_its_thresholds():
     assert f"RSI {rsi['line']['values'][-1]:.0f}" in rsi["headline"]
     vol = next(u for u in b["unscored"] if u["name"] == "volatility")
     assert all(s == 0 for s in vol["strip"] if s is not None) and vol["line"]["values"][-1] > 0
+
+
+def test_a_trade_sees_the_score_and_signals_of_the_close_before_its_day_and_nothing_after():
+    df = synthetic_candles(600, seed=8)
+    day = df.index[400]
+    at = (day + pd.Timedelta(hours=17)).isoformat()
+    (then, missing) = score.at_times(CFG, df, None, None, [at, None])
+    assert missing is None and then["basis_close"] == f"{df.index[399]:%Y-%m-%d}"
+    assert then["score"] == pytest.approx(score.combine(score.states(CFG, df)).iloc[399])
+    assert then["label"] == score.label(then["score"])
+    assert [c["key"] for c in then["components"]] == [c.key for c in score.COMPONENTS]
+    assert not {g["name"] for g in then["firing"]} & score.SCORED_ELSEWHERE
+    assert all(g["bias"] or g["risk"] for g in then["firing"])
+    later = df.copy()
+    later.iloc[400:, later.columns.get_loc("close")] *= 3  # the trade's own day and after change nothing
+    (again,) = score.at_times(CFG, later, None, None, [at])
+    assert again["score"] == pytest.approx(then["score"]) and again["firing"] == then["firing"]
+
+
+def test_the_snapshot_gives_each_open_exchange_trade_its_signals_and_the_position_a_weighted_entry_score(tmp_path):
+    from ethtracker.journal import Journal
+    df = synthetic_candles(500, seed=3)
+    times = [f"{df.index[i]:%Y-%m-%d}T12:00:00Z" for i in (300, 450)]
+    account = {"source": "coinbase", "positions": [{"product": "ETH-PERP-INTX", "side": "long", "size": 3.0, "trades": [
+        {"time": times[0], "price": 100.0, "size": 1.0}, {"time": times[1], "price": 110.0, "size": 2.0},
+        {"time": None, "price": None, "size": 0.5}]}], "summary": None}
+    snap = snapshot.build(CFG, Journal(tmp_path / "s.json"), df, float(df["close"].iloc[-1]), history=df, account=account)
+    (p,) = snap["account"]["positions"]
+    a, b, earlier = p["trades"]
+    assert earlier["signals"] is None and a["signals"]["basis_close"] == f"{df.index[299]:%Y-%m-%d}"
+    assert p["entry_score"] == pytest.approx((a["signals"]["score"] * 1 + b["signals"]["score"] * 2) / 3)
+    assert "signals" not in account["positions"][0]["trades"][0]  # the input is left as it was
+    assert len(snap["score"]["history"][-1]) == 3 and snap["score"]["history"][-1]["close"] == pytest.approx(float(df["close"].iloc[-1]), abs=0.01)

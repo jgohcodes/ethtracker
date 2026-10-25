@@ -5,6 +5,7 @@ import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, FRESH_SECONDS, STALE_SECONDS, ACTIONS, freshnessThresholds, describeInterval,
   chance, eth, funding8h, SCORE, signedFixed, stateWord, stripSummary, PLAN_STATUS, TREND, CROWDING, lookup, reading, lineSummary,
+  shortDate, utcTime, scoreLabel,
 } from "../public/format.mjs";
 
 test("money formatting groups thousands, signs deltas and survives missing values", () => {
@@ -185,4 +186,11 @@ test("a signal's reading prints in its own unit and its line reads aloud with wh
   const values = Array.from({ length: 30 }, (_, i) => (i - 20) / 100);
   assert.equal(lineSummary({ label: "28-day return", unit: "pct", values, thresholds: [0] }),
     "28-day return: 14 days ago −5.0%, 7 days ago +2.0%, 3 days ago +6.0%, now +9.0%; flips at +0.0%");
+});
+
+test("axis dates, exchange times and score words", () => {
+  assert.deepEqual([shortDate("2026-07-27"), shortDate("2026-01-01T00:00:00Z"), shortDate(null)], ["27 Jul", "1 Jan", ""]);
+  assert.deepEqual([utcTime("2026-10-25T17:02:11.123456Z"), utcTime("bad")], ["2026-10-25 17:02 UTC", ""]);
+  assert.deepEqual([-0.54, -0.5, -0.2, 0, 0.2, 0.5, 0.51, null].map(scoreLabel),
+    ["Strongly negative", "Strongly negative", "Leaning negative", "Neutral", "Neutral", "Leaning positive", "Strongly positive", null]);
 });

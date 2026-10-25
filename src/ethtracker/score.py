@@ -34,7 +34,7 @@ import pandas as pd
 from . import indicators, signals
 
 STRIP_DAYS = 30  # each signal's line: today and the 29 days before it
-HISTORY_DAYS = 90
+HISTORY_DAYS = 365  # the score against ETH's close: the page shows 3 months or the year
 HORIZON = 30
 FELL = 0.10
 CROWDED = 0.90  # funding at or above this percentile of its past year
@@ -281,7 +281,8 @@ def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.Dat
         })
     return {
         "value": today, "label": label(today) if today is not None else None, "ago": ago,
-        "history": [{"date": f"{d:%Y-%m-%d}", "score": round(float(v), 4)} for d, v in path.items() if pd.notna(v)],
+        "history": [{"date": f"{d:%Y-%m-%d}", "score": round(float(v), 4), "close": round(float(history["close"][d]), 2)}
+                    for d, v in path.items() if pd.notna(v)],
         "calibration": calibration(history, score, today) if today is not None else None,
         "components": components, "unscored": unscored(cfg, frame, derivs),
         "strip_dates": [f"{d:%Y-%m-%d}" for d in history.index[-STRIP_DAYS:]],
@@ -289,6 +290,36 @@ def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.Dat
 
 
 SCORED_ELSEWHERE = {"trend", "long_trend", "volume_pressure"}  # the same rules as the trend, long_trend and volume components
+
+
+def at_times(cfg, history: pd.DataFrame, funding8h: pd.Series | None, derivs: pd.DataFrame | None, times) -> list[dict | None]:
+    """The score and the signals as they stood when each trade was made: on the completed daily closes before
+    the trade's UTC day, the same basis as the buy log, so nothing from the trade's own day leaks in."""
+    st = states(cfg, history, funding8h)
+    sc = combine(st)
+    out = []
+    for at in times:
+        if not at:
+            out.append(None)
+            continue
+        at = pd.Timestamp(at)
+        day = (at.tz_localize("UTC") if at.tzinfo is None else at.tz_convert("UTC")).normalize()
+        before = history[history.index < day]
+        if len(before) < 2:
+            out.append(None)
+            continue
+        d = before.index[-1]
+        sigs = signals.compute(cfg, before, None if derivs is None else derivs[derivs.index < day])
+        value = sc.get(d)
+        out.append({
+            "basis_close": f"{d:%Y-%m-%d}", "close": float(before["close"].iloc[-1]),
+            "score": None if pd.isna(value) else float(value), "label": None if pd.isna(value) else label(value),
+            "components": [{"key": c.key, "name": c.name, "weight": c.weight,
+                            "state": None if pd.isna(st[c.key].get(d)) else int(st[c.key][d])} for c in COMPONENTS],
+            "firing": [{"name": g.name, "bias": g.bias, "risk": g.risk, "headline": g.headline}
+                       for g in sigs.signals if (g.bias or g.risk) and g.name not in SCORED_ELSEWHERE],
+        })
+    return out
 
 
 def unscored(cfg, frame: pd.DataFrame, derivs: pd.DataFrame | None) -> list[dict]:

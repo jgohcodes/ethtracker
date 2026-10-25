@@ -124,13 +124,16 @@ def test_a_key_that_can_trade_is_called_out():
     assert any("WARNING" in line for line in coinbase.probe(Trading()))
 
 
-def test_the_account_holds_the_eth_position_collateral_and_eth_fills_only():
+def test_the_account_holds_the_eth_position_its_open_trades_and_the_collateral():
     acct = coinbase.account(FakeClient())
     (p,) = acct["positions"]
     assert p["side"] == "long" and p["size"] == pytest.approx(4.5321) and p["entry"] == pytest.approx(2311.17)
     assert p["liquidation"] == pytest.approx(1262.40) and p["mark"] == pytest.approx(2340.55) and p["leverage"] == 2.1
     assert acct["summary"]["collateral"] == pytest.approx(5004.99)
-    assert [f["product"] for f in acct["fills"]] == ["ETH-PERP-INTX"] and acct["fills"][0]["price"] == pytest.approx(2311.17)
+    assert "fills" not in acct
+    (t,) = p["trades"]
+    assert p["trades_complete"] and t["time"] == "2026-10-25T17:02:11Z" and t["size"] == pytest.approx(4.5321)
+    assert t["price"] == pytest.approx(2311.17)
     assert coinbase.account(FakeClient(positions=False))["positions"] == []
 
 
@@ -173,6 +176,8 @@ def test_the_daily_job_sends_the_account_to_the_dashboard_and_nothing_of_it_to_t
     captured = capsys.readouterr()
     (snap,) = dash.snapshots
     assert snap["account"]["positions"][0]["liquidation"] == pytest.approx(1262.40)
+    (trade,) = snap["account"]["positions"][0]["trades"]
+    assert "fills" not in snap["account"] and trade["signals"]["score"] is not None and trade["signals"]["components"]
     for secret in ("4.5321", "1262", "2311", "5004", UUID):
         assert secret not in captured.out + captured.err, secret
 
@@ -219,7 +224,8 @@ def test_amounts_nested_by_currency_read_in_the_contracts_currency_and_the_probe
     assert p["entry"] == pytest.approx(2311.17) and p["liquidation"] == pytest.approx(1262.40)
     assert p["mark"] == pytest.approx(2340.55) and p["maintenance"] == pytest.approx(212.15)
     assert acct["summary"] == {"collateral": pytest.approx(5004.99), "unrealized": pytest.approx(133.15),
-                               "liquidation_buffer": pytest.approx(4521.0), "liquidation_percentage": pytest.approx(9.6)}
+                               "liquidation_buffer": pytest.approx(4521.0), "liquidation_percentage": pytest.approx(9.6),
+                               "total": pytest.approx(5138.14)}
     lines = "\n".join(coinbase.probe(NestedClient()))
     assert "values read: size yes, entry yes, mark yes, liquidation yes" in lines
     assert "values read: collateral yes, unrealized yes, liquidation_buffer yes" in lines
@@ -264,3 +270,58 @@ def test_no_buffer_estimate_when_the_portfolio_holds_other_positions_too():
             return status, body
     (p,) = coinbase.account(TwoPositions())["positions"]
     assert p["liquidation"] is None and p["liquidation_from"] is None
+
+
+def fill(time, side, size, price, order=None, quote=False):
+    return {"time": time, "product": "ETH-PERP-INTX", "order": order or time, "side": side, "size": size, "price": price, "fee": 0.1}
+
+
+def test_open_trades_group_fills_by_order_and_close_the_oldest_first():
+    fills = [
+        fill("2026-09-01T10:00:00Z", "buy", 1.0, 2000.0, "a"), fill("2026-09-01T10:00:01Z", "buy", 1.0, 2100.0, "a"),
+        fill("2026-09-08T10:00:00Z", "buy", 1.0, 1900.0, "b"),
+        fill("2026-09-15T10:00:00Z", "sell", 1.5, 2200.0, "c"),
+        fill("2026-09-22T10:00:00Z", "buy", 0.5, 2300.0, "d"),
+    ]
+    out = coinbase.open_trades(fills, 2.0)
+    assert out["complete"]
+    assert [(t["time"][:10], round(t["size"], 6), round(t["price"], 2)) for t in out["trades"]] == [
+        ("2026-09-01", 0.5, 2050.0), ("2026-09-08", 1.0, 1900.0), ("2026-09-22", 0.5, 2300.0)]
+    assert out["trades"][0]["opened"] == pytest.approx(2.0)
+
+
+def test_a_round_trip_to_flat_leaves_only_the_trades_since():
+    fills = [fill("2026-08-01T00:00:00Z", "buy", 2.0, 3000.0), fill("2026-08-20T00:00:00Z", "sell", 2.0, 2500.0),
+             fill("2026-10-25T17:00:00Z", "buy", 1.0, 2311.0)]
+    out = coinbase.open_trades(fills, 1.0)
+    assert out["complete"] and [t["time"][:10] for t in out["trades"]] == ["2026-10-25"]
+
+
+def test_a_position_older_than_the_fills_fetched_shows_as_an_earlier_trade():
+    out = coinbase.open_trades([fill("2026-10-25T17:00:00Z", "buy", 1.0, 2311.0)], 3.0)
+    assert not out["complete"]
+    assert out["trades"][0]["time"] is None and out["trades"][0]["size"] == pytest.approx(2.0)
+    assert sum(t["size"] for t in out["trades"]) == pytest.approx(3.0)
+
+
+def test_a_fill_sized_in_usdc_is_converted_to_eth():
+    f = coinbase.fill_from({"product_id": "ETH-PERP-INTX", "side": "BUY", "size": "2311.17", "price": "2311.17", "size_in_quote": True,
+                            "trade_time": "2026-10-25T17:02:11Z", "order_id": "o"})
+    assert f["size"] == pytest.approx(1.0) and f["order"] == "o"
+
+
+def test_fills_are_paged_until_the_cursor_runs_out():
+    class Paged(FakeClient):
+        seen = []
+
+        def get(self, path, params=None):
+            if path.endswith("/fills"):
+                self.seen.append(dict(params))
+                page = int(params.get("cursor") or 0)
+                return 200, {"fills": [{"product_id": "ETH-PERP-INTX", "side": "BUY", "size": "1", "price": "2000",
+                                        "trade_time": f"2026-10-2{page}T00:00:00Z", "order_id": str(page)}],
+                             "cursor": str(page + 1) if page < 2 else ""}
+            return super().get(path, params)
+    client = Paged()
+    fills = coinbase.eth_fills(client, "ETH-PERP-INTX")
+    assert len(fills) == 3 and client.seen[0]["product_ids"] == ["ETH-PERP-INTX"] and client.seen[-1]["cursor"] == "2"

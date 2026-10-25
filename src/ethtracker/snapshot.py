@@ -72,6 +72,21 @@ def closed_candles(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
     return df[df.index < pd.Timestamp(now).tz_convert("UTC").normalize()]
 
 
+def _with_entry_signals(cfg: Config, account: dict, history: pd.DataFrame, funding8h, derivs) -> dict:
+    """Each open trade on the exchange with the score and the signals as they stood when it was made, and each
+    position's entry score: its trades' scores weighted by how much of each is still open."""
+    account = {**account, "positions": [dict(p) for p in account.get("positions") or []]}
+    for p in account["positions"]:
+        trades = [dict(t) for t in p.get("trades") or []]
+        for t, then in zip(trades, score.at_times(cfg, history, funding8h, derivs, [t.get("time") for t in trades])):
+            t["signals"] = then
+        scored = [(t["signals"]["score"], abs(t["size"])) for t in trades if t.get("signals") and t["signals"]["score"] is not None]
+        weight = sum(w for _, w in scored)
+        p["trades"] = trades
+        p["entry_score"] = sum(s * w for s, w in scored) / weight if weight else None
+    return account
+
+
 def build(
     cfg: Config,
     journal: Journal,
@@ -206,7 +221,7 @@ def build(
         "crowding": plan.crowding(funding8h),
         "odds": plan.odds(context),
         "score": score.block(cfg, context, funding8h, frame, derivs),
-        "account": account,
+        "account": _with_entry_signals(cfg, account, context, funding8h, derivs) if account else None,
         "buys": decisions.review(context, journal.decisions, {p.id: p for p in journal.positions}, float(price))
         if journal.decisions else None,
         "config": {

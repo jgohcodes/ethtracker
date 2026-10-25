@@ -193,15 +193,6 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
 .score__lead { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; }
 .score__value { display: flex; align-items: center; gap: 12px; }
 .score__number { font-size: 40px; font-weight: 650; line-height: 1; font-variant-numeric: tabular-nums; }
-.score__chart { flex: 1 1 280px; min-width: 0; max-width: 520px; }
-.spark { width: 100%; height: auto; display: block; }
-.spark__line { fill: none; stroke: var(--ink-2); stroke-width: 1.6; stroke-linejoin: round; }
-.spark__zero { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.6; }
-.spark__band { stroke: var(--hair); stroke-width: 1; }
-.spark__mark { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.4; }
-.spark__now { fill: var(--muted); }
-.spark__now--pos { fill: var(--good); }
-.spark__now--neg { fill: var(--critical); }
 .score__ago { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; font-variant-numeric: tabular-nums; }
 .score__meaning { margin-top: 12px; max-width: 95ch; }
 .score__table { margin-top: 12px; }
@@ -225,6 +216,46 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
 .state[data-sign="flat"] .state__glyph { color: var(--muted); }
 .score__table .strip-cell { padding-left: 14px; }
 .score__legend { margin-top: 10px; }
+.score__overlay { margin-top: 14px; }
+.sp-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px; margin-bottom: 6px; }
+.sp-key { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; color: var(--ink-2); }
+.sp-key__bars { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--good) 50%, var(--critical) 50%); opacity: 0.6; }
+.sp-key__line { display: inline-block; width: 16px; height: 2px; background: var(--ink); }
+.seg { display: inline-flex; gap: 4px; }
+.btn--seg { min-height: 28px; padding: 3px 10px; font-size: 12.5px; }
+.btn--seg[aria-pressed="true"] { background: var(--ink); color: var(--page); border-color: transparent; }
+.sp { width: 100%; height: auto; display: block; overflow: visible; }
+.sp__band { fill: var(--surface-2); }
+.sp__zero { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.6; }
+.sp__bar--pos { fill: var(--good); opacity: 0.55; }
+.sp__bar--neg { fill: var(--critical); opacity: 0.55; }
+.sp__bar--flat { fill: var(--muted); opacity: 0.5; }
+.sp__price { fill: none; stroke: var(--ink); stroke-width: 1.7; stroke-linejoin: round; }
+.sp__now { fill: var(--ink); stroke: var(--surface); stroke-width: 1.5; }
+.sp__axis { font-size: 10.5px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
+.sp__axis--now { fill: var(--ink); font-weight: 600; }
+.sp__hit { fill: transparent; }
+.sp__hit:hover { fill: var(--ink); fill-opacity: 0.06; }
+.trades { margin-top: 10px; }
+.trades__list { list-style: none; padding: 0; margin: 0; }
+.trade { border-top: 1px solid var(--hair); padding: 10px 0; }
+.trade__head { display: flex; flex-wrap: wrap; gap: 4px 14px; font-weight: 550; font-variant-numeric: tabular-nums; }
+.trade__when { color: var(--ink-2); font-weight: 500; }
+.trade__score { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.score-inline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-variant-numeric: tabular-nums; overflow-wrap: normal; }
+.score-inline__n { white-space: nowrap; }
+.trade__parts { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 13px; }
+.part__glyph { font-size: 10px; margin-right: 4px; }
+.part[data-sign="up"] .part__glyph { color: var(--good); }
+.part[data-sign="down"] .part__glyph { color: var(--critical); }
+.part[data-sign="flat"] .part__glyph { color: var(--muted); }
+.trade__sigs { list-style: none; padding: 0; margin: 6px 0 0; font-size: 13px; color: var(--ink-2); }
+.trade__sig { display: flex; gap: 6px; align-items: baseline; }
+.trade__sig + .trade__sig { margin-top: 2px; }
+.trade__sig[data-sign="up"] .sig__glyph { color: var(--good); }
+.trade__sig[data-sign="down"] .sig__glyph { color: var(--critical); }
+.sp-key__item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; margin-right: 10px; }
 .line { display: block; overflow: visible; }
 .line__flip { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.55; }
 .line__second { fill: none; stroke: var(--muted); stroke-width: 1; stroke-linejoin: round; opacity: 0.8; }

@@ -170,6 +170,23 @@ export function lineSummary(line) {
   return `${line.label}: 14 days ago ${at(14)}, 7 days ago ${at(7)}, 3 days ago ${at(3)}, now ${at(0)}` + (flips ? `; flips at ${flips}` : "");
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// "2026-07-27" -> "27 Jul": an axis label, read from the string so no time zone can shift the day.
+export function shortDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso ?? "");
+  return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}` : "";
+}
+
+// An exchange time, "2026-10-25T17:02:11.123Z" -> "2026-10-25 17:02 UTC".
+export function utcTime(iso) {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(iso ?? "");
+  return m ? `${m[1]} ${m[2]} UTC` : "";
+}
+
+// The score card's words for a score: the same edges as the Python side (each bucket includes its upper edge).
+export const scoreLabel = (v) => (!finite(v) ? null : v <= -0.5 ? "Strongly negative" : v <= -0.2 ? "Leaning negative"
+  : v <= 0.2 ? "Neutral" : v <= 0.5 ? "Leaning positive" : "Strongly positive");
+
 export function lookup(table, key) {
   return table[key] ?? { tone: "muted", icon: "?", label: String(key) };
 }

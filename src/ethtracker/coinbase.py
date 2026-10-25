@@ -200,9 +200,12 @@ def probe(client: Client) -> list[str]:
                             lines.append(f"    not read: {key} from {field} = {_describe(eth[0].get(field))}")
             if label[0] == "perpetuals portfolio summary" and isinstance(body, dict):
                 lines.append(f"  values read: {_read(summary_from(body))}")
-    shown = [p.get("liquidation_from") for p in account(client)["positions"]]
+    held = account(client)["positions"]
     source = {"exchange": "the exchange's own", "buffer": "worked out from the portfolio's liquidation buffer", None: "none"}
-    lines.append("dashboard liquidation price: " + ("; ".join(source[s] for s in shown) if shown else "no ETH perp position"))
+    lines.append("dashboard liquidation price: " + ("; ".join(source[p.get("liquidation_from")] for p in held) if held else "no ETH perp position"))
+    if held:
+        lines.append("open trades rebuilt from fills: " + "; ".join(
+            "all found" if p.get("trades_complete") else "older fills needed (shown as an earlier trade)" for p in held))
     return lines
 
 
@@ -325,6 +328,10 @@ def liquidation_from_buffer(p: dict, buffer: float | None) -> float | None:
     return max(0.0, mark - buffer / (size * (1 - m)))
 
 
+FILL_PAGES = 5  # pages of 100 fills: how far back the open trades are rebuilt from
+EPS = 1e-6  # ETH: below the smallest order size (0.0001)
+
+
 def summary_from(body: dict) -> dict:
     """The perpetuals portfolio: collateral and the liquidation buffer sit on the portfolio, totals on the summary."""
     portfolio = (body.get("portfolios") or [{}])[0]
@@ -332,17 +339,73 @@ def summary_from(body: dict) -> dict:
     return {"collateral": _num(_first(s, "collateral", "total_balance")),
             "unrealized": _num(_first(s, "unrealized_pnl")),
             "liquidation_buffer": _num(_first(s, "liquidation_buffer")),
-            "liquidation_percentage": _num(_first(s, "liquidation_percentage"))}
+            "liquidation_percentage": _num(_first(s, "liquidation_percentage")),
+            "total": _num(_first(s, "total_balance"))}
 
 
 def fill_from(item: dict) -> dict:
+    size, price = _num(item.get("size")), _num(item.get("price"))
+    if size is not None and price and str(item.get("size_in_quote")).lower() == "true":
+        size = size / price  # an order placed in USDC reports its size in USDC
     return {"time": _first(item, "trade_time", "created_time", "time"), "product": item.get("product_id"),
-            "side": str(item.get("side", "")).lower(), "size": _num(item.get("size")), "price": _num(item.get("price")),
+            "order": item.get("order_id"), "side": str(item.get("side", "")).lower(), "size": size, "price": price,
             "fee": _num(item.get("commission"))}
 
 
+def eth_fills(client: Client, product: str | None) -> list[dict]:
+    """Up to FILL_PAGES pages of the ETH perpetual's fills, newest first (Coinbase's order)."""
+    def pages(params):
+        out, cursor = [], None
+        for _ in range(FILL_PAGES):
+            status, body = client.get("/api/v3/brokerage/orders/historical/fills", {**params, **({"cursor": cursor} if cursor else {})})
+            if status != 200 or not isinstance(body, dict):
+                break
+            items = [i for i in body.get("fills", []) if isinstance(i, dict)]
+            out += [fill_from(i) for i in items if _is_eth_perp(i)]
+            cursor = body.get("cursor")
+            if not cursor or not items:
+                break
+        return out
+    fills = pages({"product_ids": [product], "limit": 100}) if product else []
+    return fills or pages({"limit": 100})  # if the filter is not honoured for perps, read everything and keep ETH
+
+
+def open_trades(fills: list[dict], net_size: float | None) -> dict:
+    """The orders that make up today's position, oldest first, each with what is still open of it.
+
+    Fills are grouped by order (one order can fill in many pieces) and matched first in, first out: a sell
+    closes the oldest buys first. Whatever the fetched fills do not explain (the position held before the
+    oldest of them) is an 'earlier' trade with no price, and ``complete`` is then false."""
+    orders: dict[str, dict] = {}
+    for f in sorted((f for f in fills if f["size"] and f["price"] and f["time"]), key=lambda f: f["time"]):
+        q = f["size"] * (1 if f["side"] == "buy" else -1)
+        o = orders.setdefault(f["order"] or f["time"], {"time": f["time"], "qty": 0.0, "gross": 0.0, "cost": 0.0, "fee": 0.0})
+        o["qty"] += q
+        o["gross"] += abs(q)
+        o["cost"] += abs(q) * f["price"]
+        o["fee"] += f["fee"] or 0.0
+    net = net_size or 0.0
+    earlier = net - sum(o["qty"] for o in orders.values())
+    lots = [{"time": None, "price": None, "size": earlier, "opened": earlier, "fee": None}] if abs(earlier) > EPS else []
+    for o in orders.values():
+        q = o["qty"]
+        if abs(q) <= EPS:
+            continue
+        while abs(q) > EPS and lots and (lots[0]["size"] > 0) != (q > 0):  # q works against the open lots: close oldest first
+            lot = lots[0]
+            if abs(lot["size"]) <= abs(q) + EPS:
+                q += lot["size"]
+                lots.pop(0)
+            else:
+                lot["size"] += q
+                q = 0.0
+        if abs(q) > EPS:
+            lots.append({"time": o["time"], "price": o["cost"] / o["gross"], "size": q, "opened": o["qty"], "fee": o["fee"]})
+    return {"trades": lots, "complete": abs(earlier) <= EPS}
+
+
 def account(client: Client) -> dict:
-    """Your ETH perpetual positions, the perpetuals portfolio's collateral and recent ETH perpetual fills."""
+    """Your ETH perpetual positions, each with the trades still open in it, and the perpetuals portfolio's collateral."""
     positions, summary, held = [], {}, 0
     for p in _portfolios(client):
         if "INTX" not in str(p.get("type", "")).upper() or not p.get("uuid"):
@@ -358,13 +421,12 @@ def account(client: Client) -> dict:
     status, body = client.get("/api/v3/brokerage/cfm/positions")
     if status == 200 and isinstance(body, dict):
         positions += [position_from(i) for i in body.get("positions", []) if isinstance(i, dict)]
-    status, body = client.get("/api/v3/brokerage/orders/historical/fills", {"limit": 50})
-    fills = []
-    if status == 200 and isinstance(body, dict):
-        fills = [fill_from(i) for i in body.get("fills", []) if isinstance(i, dict) and _is_eth_perp(i)]
     eth = [p for p in positions if _is_eth_perp({"product_id": p.get("product")})]
+    for p in eth:
+        rebuilt = open_trades([f for f in eth_fills(client, p["product"]) if f["product"] == p["product"]], p["size"])
+        p["trades"], p["trades_complete"] = rebuilt["trades"], rebuilt["complete"]
     if held == 1 and len(eth) == 1 and eth[0]["liquidation"] is None and summary:
         eth[0]["liquidation"] = liquidation_from_buffer(eth[0], summary.get("liquidation_buffer"))
         eth[0]["liquidation_from"] = "buffer" if eth[0]["liquidation"] is not None else None
     return {"source": "coinbase", "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "positions": eth, "summary": summary or None, "fills": fills[:20]}
+            "positions": eth, "summary": summary or None}
