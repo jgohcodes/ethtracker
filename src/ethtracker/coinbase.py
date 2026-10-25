@@ -46,11 +46,32 @@ class Key:
     alg: str  # ES256 or EdDSA
 
 
+PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.+?-----END [A-Z ]*PRIVATE KEY-----", re.S)
+KEY_NAME = re.compile(r"organizations/[\w-]+/apiKeys/[\w-]+")
+
+
+def _parse(text: str) -> dict:
+    """The key file's fields. Accepts the file as downloaded, the same with real line breaks inside the private key
+    (as copied from a screen), or just the key name and the PEM block pasted one after the other."""
+    text = text.strip().lstrip("\ufeff")
+    for strict in (True, False):  # strict=False allows the raw line breaks a copied key carries
+        try:
+            data = json.loads(text, strict=strict)
+            if isinstance(data, dict):
+                return data
+        except ValueError:
+            pass
+    pem, name = PEM.search(text), KEY_NAME.search(text)
+    if pem and name:
+        return {"name": name.group(0), "privateKey": pem.group(0)}
+    raise DataError(
+        f"{ENV} is not a key file: {len(text)} characters, starts with '{{': {'yes' if text.startswith('{') else 'no'}, "
+        f"a private key block: {'yes' if pem else 'no'}, a key name (organizations/.../apiKeys/...): "
+        f"{'yes' if name else 'no'}. Paste the whole downloaded .json file's text")
+
+
 def load_key(text: str) -> Key:
-    try:
-        data = json.loads(text)
-    except ValueError as exc:
-        raise DataError(f"{ENV} is not JSON: paste the whole downloaded key file") from exc
+    data = _parse(text)
     key_id = data.get("name") or data.get("id") or data.get("keyName")
     secret = data.get("privateKey") or data.get("private_key") or data.get("secret")
     if not key_id or not secret:

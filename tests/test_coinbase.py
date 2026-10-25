@@ -57,9 +57,19 @@ def test_an_ed25519_key_signs_eddsa_tokens_and_the_other_claim_style_uses_uris()
     private.public_key().verify(sig, signed)
 
 
+def test_a_key_copied_with_real_line_breaks_or_as_two_pasted_parts_still_loads():
+    text, _ = ec_key_json()
+    data = json.loads(text)
+    raw_newlines = '{\n  "name": "%s",\n  "privateKey": "%s"\n}\n' % (data["name"], data["privateKey"])
+    assert "\n" in data["privateKey"] and coinbase.load_key(raw_newlines).alg == "ES256"
+    two_parts = f"{data['name']}\n{data['privateKey']}"
+    assert coinbase.load_key(two_parts).id == data["name"]
+
+
 def test_a_broken_key_names_what_is_missing_but_never_the_secret():
-    with pytest.raises(DataError, match="not JSON"):
-        coinbase.load_key("not json")
+    with pytest.raises(DataError, match="not a key file: 8 characters") as exc:
+        coinbase.load_key("s3cretxx")
+    assert "s3cret" not in str(exc.value) and "private key block: no" in str(exc.value)
     with pytest.raises(DataError, match="fields found: privateKey") as exc:
         coinbase.load_key(json.dumps({"privateKey": "s3cret"}))
     assert "s3cret" not in str(exc.value)

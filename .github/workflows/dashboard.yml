@@ -58,6 +58,7 @@ jobs:
       # Which Coinbase endpoints the view-only key can read: statuses, field names and yes/no only, never values.
       - name: Account check
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'account')) }}
+        continue-on-error: true
         env:
           COINBASE_API_KEY_JSON: ${{ secrets.COINBASE_API_KEY_JSON }}
         run: ethtracker account-check
