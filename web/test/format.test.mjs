@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, FRESH_SECONDS, STALE_SECONDS, ACTIONS, freshnessThresholds, describeInterval,
-  chance, eth, funding8h, PLAN_STATUS, TREND, CROWDING, lookup,
+  chance, eth, funding8h, SCORE, signedFixed, stateWord, stripSummary, PLAN_STATUS, TREND, CROWDING, lookup,
 } from "../public/format.mjs";
 
 test("money formatting groups thousands, signs deltas and survives missing values", () => {
@@ -132,6 +132,15 @@ test("symbol overrides are limited to characters TradingView symbols use", () =>
   for (const bad of ["", "A".repeat(41), 'x"};alert(1)//', "a b", "<script>", null, undefined, 5]) {
     assert.equal(isValidSymbol(bad), false, String(bad));
   }
+});
+
+test("score labels differ by glyph and the strip reads aloud at 14, 7 and 3 days and now", () => {
+  const icons = Object.values(SCORE).map((s) => s.icon);
+  assert.equal(new Set(icons).size, icons.length);
+  assert.deepEqual([signedFixed(0.3), signedFixed(-0.25), signedFixed(0), signedFixed(null)], ["+0.30", "−0.25", "±0.00", "n/a"]);
+  assert.deepEqual([stateWord(1), stateWord(0), stateWord(-1), stateWord(null)], ["positive", "neutral", "negative", "n/a"]);
+  const strip = [1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, -1, -1, -1, -1];
+  assert.equal(stripSummary(strip), "14 days ago positive, 7 days ago neutral, 3 days ago negative, now negative");
 });
 
 test("odds never round a small chance to 0% or a near-certainty to 100%", () => {

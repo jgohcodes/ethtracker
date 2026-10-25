@@ -1,6 +1,7 @@
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, describeInterval, finite, chance, eth, funding8h, PLAN_STATUS, TREND, CROWDING, lookup,
+  SCORE, signedFixed, stateWord, stripSummary,
 } from "./format.mjs";
 
 const TOKEN_KEY = "ethtracker.viewToken";
@@ -383,6 +384,137 @@ function renderOdds(s) {
     h("p", { class: "note", text: "Information, not instructions: under the adding plan these never change the weekly add." }));
 }
 
+// ---- the signal score -----------------------------------------------------------------------------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs = {}, ...children) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs)) if (value !== undefined && value !== null) el.setAttribute(key, value);
+  for (const child of children.flat()) if (child) el.append(child);
+  return el;
+}
+
+const SIGNAL_NAMES = {
+  rsi: "RSI (14 days)", rsi_rollover: "RSI rolling over", extension: "Stretch from the 20-day average",
+  volatility: "Volatility (risk only)", avwap_low: "AVWAP from the 365-day low", avwap_year: "AVWAP from the year open",
+  poc: "Volume profile (365 days)", funding: "Funding level", oi_change: "Open interest, 24 hours",
+  oi_level: "Open interest level", long_liquidations: "Long liquidations", short_liquidations: "Short liquidations",
+};
+const CELL = 8, GAP = 3, STRIP_H = 22;
+const stripWidth = (n) => n * (CELL + GAP) - GAP;
+
+// Up bar, down bar or a dot on the midline: the sign reads from position and shape, colour only adds to it.
+function strip(values) {
+  const mid = STRIP_H / 2;
+  const marks = values.map((v, i) => {
+    const x = i * (CELL + GAP);
+    const now = i === values.length - 1 ? " strip__now" : "";
+    if (v === null || v === undefined) return null;
+    if (v > 0) return svg("rect", { x, y: 2, width: CELL, height: mid - 3, rx: 1.5, class: `strip__pos${now}` });
+    if (v < 0) return svg("rect", { x, y: mid + 1, width: CELL, height: mid - 3, rx: 1.5, class: `strip__neg${now}` });
+    return svg("circle", { cx: x + CELL / 2, cy: mid, r: 2, class: `strip__flat${now}` });
+  });
+  const w = stripWidth(values.length);
+  return svg("svg", { viewBox: `0 0 ${w} ${STRIP_H}`, width: w, height: STRIP_H, role: "img", "aria-label": stripSummary(values), class: "strip" },
+    svg("line", { x1: 0, x2: w, y1: mid, y2: mid, class: "strip__axis" }), marks);
+}
+
+// The strip's header: where 14, 7 and 3 days ago and today fall.
+function stripAxis(n) {
+  const w = stripWidth(n);
+  const at = (back) => (n - 1 - back) * (CELL + GAP) + CELL / 2;
+  return svg("svg", { viewBox: `0 0 ${w} 12`, width: w, height: 12, "aria-hidden": "true", class: "strip strip--axis" },
+    [[14, "14d"], [7, "7d"], [3, "3d"], [0, "now"]].filter(([b]) => b < n).map(([b, t]) =>
+      svg("text", { x: at(b), y: 10, "text-anchor": b === 0 ? "end" : b === 14 ? "start" : "middle" }, document.createTextNode(t))));
+}
+
+function scoreLine(history) {
+  const W = 360, H = 64, pad = 4;
+  const n = history.length;
+  if (n < 2) return null;
+  const x = (i) => pad + (i / (n - 1)) * (W - 2 * pad);
+  const y = (v) => pad + ((1 - v) / 2) * (H - 2 * pad);
+  const points = history.map((p, i) => `${x(i).toFixed(1)},${y(p.score).toFixed(1)}`).join(" ");
+  const marks = [14, 7, 3].filter((b) => b < n).map((b) =>
+    svg("circle", { cx: x(n - 1 - b), cy: y(history[n - 1 - b].score), r: 2.5, class: "spark__mark" }));
+  const last = history[n - 1].score;
+  return svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "spark", role: "img",
+    "aria-label": `Score over the last ${n} days: from ${signedFixed(history[0].score)} to ${signedFixed(last)}` },
+  svg("line", { x1: pad, x2: W - pad, y1: y(0), y2: y(0), class: "spark__zero" }),
+  svg("line", { x1: pad, x2: W - pad, y1: y(0.2), y2: y(0.2), class: "spark__band" }),
+  svg("line", { x1: pad, x2: W - pad, y1: y(-0.2), y2: y(-0.2), class: "spark__band" }),
+  svg("polyline", { points, class: "spark__line" }), marks,
+  svg("circle", { cx: x(n - 1), cy: y(last), r: 4, class: last > 0 ? "spark__now spark__now--pos" : last < 0 ? "spark__now spark__now--neg" : "spark__now" }));
+}
+
+function stateCell(v) {
+  const glyph = v === null || v === undefined ? "" : v > 0 ? "▲" : v < 0 ? "▼" : "•";
+  return h("td", { class: "state", "data-sign": v > 0 ? "up" : v < 0 ? "down" : "flat" },
+    h("span", { class: "state__glyph", "aria-hidden": "true", text: glyph }), stateWord(v));
+}
+
+function renderScore(s) {
+  const sc = s.score;
+  const show = sc && sc.value !== null && sc.value !== undefined;
+  $("score-card").hidden = !show;
+  if (!show) { $("score").replaceChildren(); return; }
+  const info = lookup(SCORE, sc.label);
+  const n = sc.components[0]?.strip.length ?? 15;
+  const cal = sc.calibration;
+  const ago = [["14", "14 days ago"], ["7", "7 days ago"], ["3", "3 days ago"]]
+    .map(([k, t]) => h("span", { class: "ago" }, h("span", { class: "muted", text: `${t} ` }), signedFixed(sc.ago[k])));
+  const lead = h("div", { class: "score__lead" },
+    h("div", { class: "score__value" }, h("span", { class: "score__number", text: signedFixed(sc.value) }), badge(info.tone, info.icon, info.label, true)),
+    h("div", { class: "score__chart" }, scoreLine(sc.history), h("div", { class: "score__ago" }, ago)));
+  const meaning = cal && cal.same.days ? h("p", { class: "score__meaning", text:
+    `Days scored ${cal.bucket.toLowerCase()} (${signedFixed(cal.range[0], 1)} to ${signedFixed(cal.range[1], 1)}; ${cal.same.days.toLocaleString("en-US")} days ` +
+    `in ${cal.same.episodes} separate stretches since ${cal.from.slice(0, 4)}): ETH was higher ${cal.horizon} days later ${chance(cal.same.higher)} of the time ` +
+    `(median ${signedPct(cal.same.median)}), and fell 10%+ at some point within them ${chance(cal.same.fell)} of the time. ` +
+    `Every day: higher ${chance(cal.all.higher)}, median ${signedPct(cal.all.median)}, fell 10%+ ${chance(cal.all.fell)}.` +
+    (cal.same_recent?.days ? ` Since ${cal.recent_from.slice(0, 4)} alone (${cal.same_recent.days.toLocaleString("en-US")} days scored like this): ` +
+      `higher ${chance(cal.same_recent.higher)}, median ${signedPct(cal.same_recent.median)}, against every day's ` +
+      `${chance(cal.all_recent.higher)} and ${signedPct(cal.all_recent.median)}.` : "") }) : null;
+
+  const scored = sc.components.map((c) => h("tr", {},
+    h("td", {}, h("div", { text: c.name }), h("div", { class: "sub-line" }, h("span", { class: "tag", text: c.evidence === "failed" ? "failed the check" : `${c.evidence} evidence` }), " ", c.reads)),
+    h("td", { class: "num", "data-label": "weight", text: `${Math.round(c.weight * 100)}%` }),
+    h("td", { class: "strip-cell" }, strip(c.strip)),
+    stateCell(c.state),
+    h("td", { class: "num", "data-label": "adds", text: c.contribution === null ? "n/a" : signedFixed(c.contribution) })));
+  const others = (sc.unscored ?? []).map((u) => h("tr", {},
+    h("td", {}, h("div", { text: SIGNAL_NAMES[u.name] ?? u.name }), h("div", { class: "sub-line", text: u.headline }),
+      u.risk ? badge("warning", "!", "Risk") : null),
+    h("td", { class: "num", "data-label": "weight", text: "0%" }),
+    h("td", { class: "strip-cell" }, strip(u.strip)),
+    stateCell(u.state),
+    h("td", { class: "num", text: "" })));
+  const head = h("thead", {}, h("tr", {},
+    h("th", { text: "Signal" }), h("th", { class: "num", text: "Weight" }),
+    h("th", { class: "strip-cell" }, h("span", { class: "sr", text: "Last 15 days" }), stripAxis(n)), h("th", { text: "Now" }), h("th", { class: "num", text: "Adds" })));
+  const legend = h("p", { class: "note score__legend" },
+    `Strips: the last ${n} days, oldest on the left, today outlined. A bar up is positive, a bar down negative, a dot neutral. `,
+    "\u201cAdds\u201d is each signal's share of today's score.");
+  fill($("score"),
+    lead, meaning, legend,
+    h("div", { class: "scroll" }, h("table", { class: "tbl score__table" }, head,
+      h("tbody", {}, scored),
+      others.length ? h("tbody", { class: "score__unscored" },
+        h("tr", {}, h("td", { colSpan: 5, class: "score__group", text: "Shown, not scored: no published evidence of a directional edge" })), others) : null)),
+    h("details", { class: "more score__how" }, h("summary", { text: "How the score is built" }),
+      h("p", { class: "note", text:
+        "Each scored signal reads +1, 0 or −1 every day; the score is their weighted average, from −1 to +1 (a part with no data, such as funding before its history starts, drops out and the rest are rescaled). " +
+        "The weights were set from the research before looking at ETH's results: three readings of momentum and trend, the one effect with repeated out-of-sample support in crypto, carry 86%; volume pressure, a plausible mechanism with no published test, carries 14%. " +
+        "Then the check on ETH's history, 2016 to 2026: every scored part pointed the right way in both halves (before and from 2021), but leverage crowding pointed the wrong way in both, so it was set to zero. " +
+        "The edge is modest: the score's rank correlation with the next 30 days was +0.14, against about \u00b10.08 from chance alone, and +0.10 since 2021. " +
+        "RSI, stretch, anchored VWAP, the volume profile and open interest are shown with their history but carry no weight. " +
+        "The score is information, not an instruction: under the adding plan it never changes the weekly add." }),
+      h("p", { class: "note" }, "Sources: ",
+        h("a", { href: "https://ideas.repec.org/a/oup/rfinst/v34y2021i6p2689-2727..html", target: "_blank", rel: "noopener noreferrer", text: "Liu & Tsyvinski (2021), Review of Financial Studies" }),
+        "; ",
+        h("a", { href: "https://profiles.wustl.edu/en/publications/learning-and-predictability-via-technical-analysis-evidence-from-/", target: "_blank", rel: "noopener noreferrer", text: "Detzel et al. (2021), Financial Management" }),
+        ". Checked on ETH's own history with `ethtracker score-study`.")));
+}
+
 function signalRow(g) {
   const word = g.bias > 0 ? "bullish" : g.bias < 0 ? "bearish" : "neutral";
   const meta = [];
@@ -470,6 +602,7 @@ function render(s) {
   renderHeader(s);
   renderKpis(s);
   renderPlan(s);
+  renderScore(s);
   renderFloorRisk(s);
   renderMarket(s);
   renderPositions(s);
@@ -535,7 +668,7 @@ function init() {
   $("signout").addEventListener("click", () => {
     setToken(null);
     snap = null;
-    for (const id of ["kpis", "plan", "floor-risk", "market", "odds", "positions", "signals", "ladder", "closed", "chart"]) $(id).replaceChildren();
+    for (const id of ["kpis", "plan", "score", "floor-risk", "market", "odds", "positions", "signals", "ladder", "closed", "chart"]) $(id).replaceChildren();
     mountedTheme = null;
     showLogin();
   });

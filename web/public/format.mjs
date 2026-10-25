@@ -119,6 +119,28 @@ export const CROWDING = {
   "Light longs": { tone: "good", icon: "✓", label: "Light longs" },
 };
 
+// The signal score's labels, from -1 to +1: direction by glyph and position, never colour alone.
+export const SCORE = {
+  "Strongly positive": { tone: "good", icon: "▲", label: "Strongly positive" },
+  "Leaning positive": { tone: "good", icon: "△", label: "Leaning positive" },
+  Neutral: { tone: "muted", icon: "•", label: "Neutral" },
+  "Leaning negative": { tone: "serious", icon: "▽", label: "Leaning negative" },
+  "Strongly negative": { tone: "critical", icon: "▼", label: "Strongly negative" },
+};
+
+export function signedFixed(x, digits = 2) {
+  return finite(x) ? `${x > 0 ? "+" : x < 0 ? "−" : "±"}${Math.abs(x).toFixed(digits)}` : "n/a";
+}
+
+export const stateWord = (s) => (s === null || s === undefined ? "n/a" : s > 0 ? "positive" : s < 0 ? "negative" : "neutral");
+
+// "14 days ago positive, 7 days ago neutral, 3 days ago negative, now negative": a strip read aloud.
+export function stripSummary(strip) {
+  const n = strip.length;
+  const at = (back) => (n - 1 - back >= 0 ? stateWord(strip[n - 1 - back]) : "n/a");
+  return `14 days ago ${at(14)}, 7 days ago ${at(7)}, 3 days ago ${at(3)}, now ${at(0)}`;
+}
+
 export function lookup(table, key) {
   return table[key] ?? { tone: "muted", icon: "?", label: String(key) };
 }

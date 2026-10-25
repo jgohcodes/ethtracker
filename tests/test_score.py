@@ -88,6 +88,12 @@ def test_the_dashboard_block_has_strips_history_and_a_calibration():
     assert all(len(u["strip"]) == score.STRIP_DAYS for u in b["unscored"])
     cal = b["calibration"]
     assert cal["bucket"] == b["label"] and cal["same"]["days"] > 0 and cal["all"]["days"] >= cal["same"]["days"]
+    assert cal["recent_from"] == score.RECENT and cal["all_recent"]["days"] <= cal["all"]["days"]
+
+
+def test_crowding_failed_the_check_and_carries_no_weight():
+    crowding = next(c for c in score.COMPONENTS if c.key == "crowding")
+    assert crowding.weight == 0 and crowding.evidence == "failed"
 
 
 def test_the_snapshot_carries_the_score(tmp_path):

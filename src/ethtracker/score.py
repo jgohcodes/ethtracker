@@ -8,14 +8,20 @@ whatever worked by chance in one cycle):
            Strauss, Zhou & Zhu (2021, Financial Management) find price-to-moving-average ratios forecast bitcoin
            returns in and out of sample. Three readings of the same effect, on three horizons.
   weak     volume pressure and leverage crowding: plausible mechanisms, no peer-reviewed test on a single
-           crypto asset that I could find. Small weights, so they can tip a close call and never outvote trend.
+           crypto asset that I could find. Small weights (0.125 each), so they can tip a close call and never
+           outvote trend.
   none     RSI, extension, anchored VWAP, the volume profile, volatility, open interest: no published
            evidence of a directional edge, and this repository's own studies found none for oversold or
            "the dip is done" signals. Shown with their history, not scored.
 
 ``score-study`` checks the weights on ETH's history in two halves (before and from 2021): a component whose
-direction is wrong in both is a reason to drop it, and the score's buckets give today's reading its meaning
-("days scored like today were followed by...").
+direction is wrong in both is dropped, and the score's buckets give today's reading its meaning ("days scored
+like today were followed by..."). The first run (ETH 2016-2026, 30 days ahead) found:
+
+  momentum +0.12 / +0.12, trend +0.21 / +0.07, long trend +0.14 / +0.03, volume +0.03 / +0.09 (rank correlation
+  with the next 30 days, to 2020 / from 2021); leverage crowding -0.02 / -0.06, wrong in both, so its weight is
+  now 0 and the rest keep their proportions (0.30 : 0.25 : 0.20 : 0.125). Shuffling ETH's days gives about
+  +/-0.08 by chance; the score's +0.14 overall is a modest edge, weaker since 2021.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ HORIZON = 30
 FELL = 0.10
 CROWDED = 0.90  # funding at or above this percentile of its past year
 FUNDING_YEAR = 365
+RECENT = "2021-01-01"  # the institutional era, reported on its own because the edge has been weaker since
 
 
 @dataclass(frozen=True)
@@ -40,20 +47,21 @@ class Component:
     key: str
     name: str
     weight: float
-    evidence: str  # strong, weak
+    evidence: str  # strong, weak, or failed: pointed the wrong way on ETH's history
     reads: str
 
 
 COMPONENTS = (
-    Component("momentum", "Momentum, 7 and 28 days", 0.30, "strong",
+    Component("momentum", "Momentum, 7 and 28 days", 0.34, "strong",
               "+ when ETH is up over both the last 7 and 28 days, - when down over both, 0 when they disagree"),
-    Component("trend", "Trend, 20 vs 50 days", 0.25, "strong",
+    Component("trend", "Trend, 20 vs 50 days", 0.29, "strong",
               "+ when price and the 20-day average are above the 50-day, - when both below, else 0"),
-    Component("long_trend", "Long trend, 200 days", 0.20, "strong", "+ above the 200-day average, - below"),
-    Component("volume", "Volume pressure, 10 days", 0.125, "weak",
+    Component("long_trend", "Long trend, 200 days", 0.23, "strong", "+ above the 200-day average, - below"),
+    Component("volume", "Volume pressure, 10 days", 0.14, "weak",
               f"- when down days carried {signals.VOLUME_PRESSURE_RATIO}x the volume of up days, + the reverse, else 0"),
-    Component("crowding", "Leverage crowding", 0.125, "weak",
-              f"- when funding is in the top {1 - CROWDED:.0%} of its past year (crowded longs, fragile), else 0"),
+    Component("crowding", "Leverage crowding", 0.0, "failed",
+              f"- when funding is in the top {1 - CROWDED:.0%} of its past year, else 0. On ETH since 2019 crowded "
+              "readings were followed by gains slightly more often, in both halves, so it carries no weight"),
 )
 WEIGHTS = {c.key: c.weight for c in COMPONENTS}
 
@@ -181,8 +189,10 @@ def calibration(df: pd.DataFrame, score: pd.Series, value: float, horizon: int =
         return {"days": n, "episodes": signals.count_episodes(mask), "higher": float((fwd.loc[mask, "ret"] > 0).mean()),
                 "median": float(fwd.loc[mask, "ret"].median()), "fell": float(fwd.loc[mask, "fell"].astype(bool).mean())}
 
+    recent = df.index >= pd.Timestamp(RECENT, tz="UTC")
     return {"bucket": name, "range": [max(lo, -1.0), min(hi, 1.0)], "horizon": horizon, "same": stats(same),
-            "all": stats(known), "from": f"{df.index[0]:%Y-%m-%d}"}
+            "all": stats(known), "same_recent": stats(same & recent), "all_recent": stats(known & recent),
+            "from": f"{df.index[0]:%Y-%m-%d}", "recent_from": RECENT}
 
 
 def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.DataFrame, derivs: pd.DataFrame | None) -> dict:
