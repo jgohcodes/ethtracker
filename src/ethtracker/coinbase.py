@@ -191,7 +191,16 @@ def probe(client: Client) -> list[str]:
                 fields = sorted(eth[0]) if eth else []
                 lines.append(f"  ETH perpetual {name[:-1]} returned: {'yes' if eth else 'no'}"
                              + (f"; fields {', '.join(fields)}" if fields else ""))
+                if eth and name == "positions":
+                    lines.append(f"    values read: {_read(position_from(eth[0]), skip=('product', 'side'))}")
+            if label[0] == "perpetuals portfolio summary" and isinstance(body, dict):
+                lines.append(f"  values read: {_read(summary_from(body))}")
     return lines
+
+
+def _read(parsed: dict, skip=()) -> str:
+    """Which values came back as numbers: names and yes/no only."""
+    return ", ".join(f"{k} {'yes' if v is not None else 'no'}" for k, v in parsed.items() if k not in skip)
 
 
 def _is_eth_perp(item: dict) -> bool:
@@ -228,8 +237,16 @@ def _endpoints(client: Client) -> list[tuple[str, tuple[str, dict | None]]]:
 # ---- the position itself, for the private dashboard -----------------------------------------------
 
 def _num(v) -> float | None:
+    """A number, or an amount object: {"value": ...}, or {"rawCurrency": {...}, "userNativeCurrency": {...}}, where
+    the raw currency (the contract's USDC) is preferred to the account's display currency."""
     if isinstance(v, dict):
-        v = v.get("value", v.get("amount"))
+        for key in ("value", "amount"):
+            if key in v:
+                return _num(v[key])
+        for key in ("rawCurrency", "raw_currency", "userNativeCurrency", "user_native_currency"):
+            if isinstance(v.get(key), dict):
+                return _num(v[key])
+        return None
     try:
         return float(v)
     except (TypeError, ValueError):
@@ -262,6 +279,16 @@ def position_from(item: dict) -> dict:
     }
 
 
+def summary_from(body: dict) -> dict:
+    """The perpetuals portfolio: collateral and the liquidation buffer sit on the portfolio, totals on the summary."""
+    portfolio = (body.get("portfolios") or [{}])[0]
+    s = {**(body.get("summary") or {}), **(portfolio if isinstance(portfolio, dict) else {})}
+    return {"collateral": _num(_first(s, "collateral", "total_balance")),
+            "unrealized": _num(_first(s, "unrealized_pnl")),
+            "liquidation_buffer": _num(_first(s, "liquidation_buffer")),
+            "liquidation_percentage": _num(_first(s, "liquidation_percentage"))}
+
+
 def fill_from(item: dict) -> dict:
     return {"time": _first(item, "trade_time", "created_time", "time"), "product": item.get("product_id"),
             "side": str(item.get("side", "")).lower(), "size": _num(item.get("size")), "price": _num(item.get("price")),
@@ -279,11 +306,7 @@ def account(client: Client) -> dict:
             positions += [position_from(i) for i in body.get("positions", []) if isinstance(i, dict)]
         status, body = client.get(f"/api/v3/brokerage/intx/portfolio/{p['uuid']}")
         if status == 200 and isinstance(body, dict):
-            s = body.get("summary") or (body.get("portfolios") or [{}])[0] or {}
-            summary = {"collateral": _num(_first(s, "collateral", "total_balance")),
-                       "unrealized": _num(_first(s, "unrealized_pnl")),
-                       "liquidation_buffer": _num(_first(s, "liquidation_buffer")),
-                       "liquidation_percentage": _num(_first(s, "liquidation_percentage"))}
+            summary = summary_from(body)
     status, body = client.get("/api/v3/brokerage/cfm/positions")
     if status == 200 and isinstance(body, dict):
         positions += [position_from(i) for i in body.get("positions", []) if isinstance(i, dict)]

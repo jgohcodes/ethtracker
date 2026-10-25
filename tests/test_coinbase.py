@@ -190,3 +190,38 @@ def test_a_bare_ed25519_secret_needs_its_id_and_works_with_it(monkeypatch):
     assert key.alg == "EdDSA" and key.id == "7d9f0c2e-key-id"
     _, _, sig, signed = parts(coinbase.token(key, "GET", "/api/v3/brokerage/portfolios"))
     private.public_key().verify(sig, signed)
+
+
+def amount(value):
+    return {"userNativeCurrency": {"value": str(float(value) * 0.79), "currency": "GBP"},
+            "rawCurrency": {"value": value, "currency": "USDC"}}
+
+
+class NestedClient(FakeClient):
+    """Amounts as objects in two currencies; collateral on the portfolio, totals on the summary."""
+
+    def get(self, path, params=None):
+        if "/intx/positions/" in path:
+            return 200, {"positions": [{"product_id": "ETH-PERP-INTX", "position_side": "POSITION_SIDE_LONG", "net_size": "4.5321",
+                                        "entry_vwap": amount("2311.17"), "vwap": amount("2320.00"), "mark_price": amount("2340.55"),
+                                        "liquidation_price": amount("1262.40"), "unrealized_pnl": amount("133.15"), "leverage": "2.1",
+                                        "position_notional": amount("10607.43"), "mm_notional": amount("212.15")}]}
+        if "/intx/portfolio/" in path:
+            return 200, {"portfolios": [{"collateral": "5004.99", "liquidation_buffer": "4521.00", "liquidation_percentage": "9.6",
+                                         "unrealized_pnl": amount("133.15")}],
+                         "summary": {"unrealized_pnl": amount("133.15"), "total_balance": amount("5138.14")}}
+        return super().get(path, params)
+
+
+def test_amounts_nested_by_currency_read_in_the_contracts_currency_and_the_probe_says_which_values_came_back():
+    acct = coinbase.account(NestedClient())
+    (p,) = acct["positions"]
+    assert p["entry"] == pytest.approx(2311.17) and p["liquidation"] == pytest.approx(1262.40)
+    assert p["mark"] == pytest.approx(2340.55) and p["maintenance"] == pytest.approx(212.15)
+    assert acct["summary"] == {"collateral": pytest.approx(5004.99), "unrealized": pytest.approx(133.15),
+                               "liquidation_buffer": pytest.approx(4521.0), "liquidation_percentage": pytest.approx(9.6)}
+    lines = "\n".join(coinbase.probe(NestedClient()))
+    assert "values read: size yes, entry yes, mark yes, liquidation yes" in lines
+    assert "values read: collateral yes, unrealized yes, liquidation_buffer yes" in lines
+    for secret in ("4.5321", "2311", "1262", "5004", "4521", "9.6", UUID):
+        assert secret not in lines, secret
