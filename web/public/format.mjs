@@ -177,6 +177,12 @@ export function shortDate(iso) {
   return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}` : "";
 }
 
+// A compact time for a table cell: "2026-10-25T17:02:11Z" -> "25 Oct 17:02".
+export function shortTime(iso) {
+  const m = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})/.exec(iso ?? "");
+  return m ? `${shortDate(iso)} ${m[1]}` : "";
+}
+
 // An exchange time, "2026-10-25T17:02:11.123Z" -> "2026-10-25 17:02 UTC".
 export function utcTime(iso) {
   const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(iso ?? "");

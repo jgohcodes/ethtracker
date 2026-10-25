@@ -1,7 +1,7 @@
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, describeInterval, finite, chance, eth, funding8h, PLAN_STATUS, TREND, CROWDING, lookup,
-  SCORE, signedFixed, stateWord, stripSummary, reading, lineSummary, shortDate, utcTime, scoreLabel,
+  SCORE, signedFixed, stateWord, stripSummary, reading, lineSummary, shortDate, shortTime, utcTime, scoreLabel,
 } from "./format.mjs";
 
 const TOKEN_KEY = "ethtracker.viewToken";
@@ -416,6 +416,7 @@ function renderAccount(s) {
   const floor = s.plan?.floor;
   const estimate = s.plan?.liq_price;
   const when = (a.fetched_at ?? "").replace("T", " ").replace("Z", " UTC");
+  const numbered = tradeList(s);
   const positions = (a.positions ?? []).map((p) => {
     const liq = p.liquidation;
     const vsFloor = finite(liq) && finite(floor)
@@ -432,7 +433,7 @@ function renderAccount(s) {
         p.leverage === null || p.leverage === undefined ? null : metric("Leverage", `${fixed(p.leverage, 2)}x`),
         p.notional === null || p.notional === undefined ? null : metric("Position value", usd(p.notional, 0)),
         finite(p.entry_score) ? metric("Signal score at entry", scoreValue(p.entry_score)) : null),
-      openTrades(p, s.price));
+      openTrades(p, s.price, s, numbered));
   });
   const sm = a.summary;
   const summary = sm ? h("div", { class: "metrics" },
@@ -452,18 +453,45 @@ function scoreValue(v) {
   const info = lookup(SCORE, scoreLabel(v));
   return h("span", { class: "score-inline" }, h("span", { class: "score-inline__n", text: signedFixed(v) }), badge(info.tone, info.icon, info.label));
 }
-const PART_NAMES = { momentum: "Momentum", trend: "Trend", long_trend: "200-day", volume: "Volume", crowding: "Crowding" };
 
 // When a trade was made: its fill time; or, worked out from the position, the two runs it fell between.
 function tradeWhen(t) {
-  if (t.first_seen) return `Held when tracking began, ${utcTime(t.seen_at)}`;
-  if (t.seen_at && t.after) return `Between ${utcTime(t.after)} and ${utcTime(t.seen_at)}`;
-  return t.time ? utcTime(t.time) : "Opened before the trades read";
+  if (t.first_seen) return `Held by ${shortTime(t.seen_at)} UTC`;
+  if (t.seen_at && t.after) return `${shortTime(t.after)} – ${shortTime(t.seen_at)} UTC`;
+  return t.time ? `${shortTime(t.time)} UTC` : "Before the trades read";
 }
 
-// Each trade still open on the exchange: when, how much, the move since, and the score and signals as they
-// stood on the close before it (the same basis as the buy log, so nothing from the trade's own day leaks in).
-function openTrades(p, price) {
+// Every open trade on the exchange, numbered oldest first across positions: the table rows and the chart's
+// markers share these numbers.
+function tradeList(s) {
+  const out = [];
+  for (const p of s.account?.positions ?? []) for (const t of p.trades ?? []) out.push({ n: out.length + 1, t, p });
+  return out;
+}
+
+// Hovering a trade's row or its marker on the score chart picks it out in both and dims the others.
+function focusTrade(n) {
+  for (const el of document.querySelectorAll("[data-trades]")) el.classList.toggle("has-focus", n !== null);
+  for (const el of document.querySelectorAll("[data-trade]")) el.classList.toggle("is-focus", n !== null && el.dataset.trade === String(n));
+}
+const focusable = (n) => ({ tabIndex: 0, onmouseenter: () => focusTrade(n), onmouseleave: () => focusTrade(null),
+  onfocus: () => focusTrade(n), onblur: () => focusTrade(null) });
+
+const PARTS = ["momentum", "trend", "long_trend", "volume"];
+function partCell(state) {
+  return h("td", { class: "state part-cell", "data-sign": state > 0 ? "up" : state < 0 ? "down" : "flat" },
+    h("span", { class: "state__glyph", "aria-hidden": "true", text: biasGlyph(state ?? 0) }), h("span", { class: "sr", text: stateWord(state) }));
+}
+function firingCell(list) {
+  return h("td", { class: "firing" }, list.length ? list.map((g) =>
+    h("span", { class: "chip", "data-sign": g.bias > 0 ? "up" : g.bias < 0 ? "down" : "flat", title: g.headline },
+      h("span", { class: "chip__glyph", "aria-hidden": "true", text: g.risk && !g.bias ? "!" : biasGlyph(g.bias) }),
+      SIGNAL_NAMES[g.name] ?? g.name)) : h("span", { class: "muted", text: "none" }));
+}
+
+// One row per open trade: when, how much, the move since, and the score and signals on the close before it
+// (the same basis as the buy log, so nothing from the trade's own day leaks in); then today's, to compare.
+function openTrades(p, price, s, numbered) {
   const trades = p.trades ?? [];
   if (!trades.length) {
     return h("p", { class: "note", text: `Coinbase's API returned neither fills nor filled orders for ${p.product ?? "this market"}, so the ` +
@@ -471,29 +499,41 @@ function openTrades(p, price) {
       "and the buy log keeps the signals for it." });
   }
   const sign = p.side === "short" ? -1 : 1;
-  const rows = trades.map((t) => {
+  const rows = numbered.filter((x) => x.p === p).map(({ n, t }) => {
     const then = t.signals;
     const since = finite(t.price) && finite(price) ? sign * (price / t.price - 1) : null;
-    const head = h("div", { class: "trade__head" },
-      h("span", { class: "trade__when", text: tradeWhen(t) }),
-      h("span", { text: `${fixed(Math.abs(t.size), 4)} ETH` + (finite(t.price) ? ` at ${usd(t.price)}` : "") }),
-      since === null ? null : h("span", {}, delta(since, `${signedPct(since)} since`)));
-    if (!then) return h("li", { class: "trade" }, head, h("div", { class: "muted sub-line", text: "No signal record: the trade's time is not known." }));
-    const parts = then.components.filter((c) => c.weight > 0).map((c) =>
-      h("span", { class: "part", "data-sign": c.state > 0 ? "up" : c.state < 0 ? "down" : "flat" },
-        h("span", { class: "part__glyph", "aria-hidden": "true", text: biasGlyph(c.state ?? 0) }), `${PART_NAMES[c.key] ?? c.name} ${stateWord(c.state)}`));
-    const firing = then.firing.map((g) => h("li", { class: "trade__sig", "data-sign": g.bias > 0 ? "up" : g.bias < 0 ? "down" : "flat" },
-      h("span", { class: "sig__glyph", role: "img", "aria-label": g.bias > 0 ? "bullish" : g.bias < 0 ? "bearish" : "neutral", text: biasGlyph(g.bias) }),
-      h("span", {}, g.headline, g.risk ? h("span", { class: "sig__meta" }, badge("warning", "!", "Risk")) : null)));
-    return h("li", { class: "trade" }, head,
-      h("div", { class: "trade__score" }, h("span", { class: "muted", text: `Score on the ${then.basis_close} close ` }),
-        finite(then.score) ? scoreValue(then.score) : "n/a"),
-      h("div", { class: "trade__parts" }, parts),
-      firing.length ? h("ul", { class: "trade__sigs" }, firing) : h("div", { class: "muted sub-line", text: "No other signal was firing." }));
+    const states = Object.fromEntries((then?.components ?? []).map((c) => [c.key, c.state]));
+    return h("tr", { "data-trade": String(n), ...focusable(n) },
+      h("td", { class: "num" }, h("span", { class: "trade-no", text: String(n) })),
+      h("td", { class: "trade__when", text: tradeWhen(t),
+        title: t.first_seen ? "Already held when tracking began: its real start may be earlier"
+          : t.seen_at && t.after ? "Made between these two daily runs" : "" }),
+      h("td", { class: "num", text: fixed(Math.abs(t.size), 4) }),
+      h("td", { class: "num", text: finite(t.price) ? usd(t.price) : "n/a" }),
+      h("td", { class: "num" }, since === null ? "n/a" : delta(since, signedPct(since))),
+      h("td", {}, then && finite(then.score) ? scoreValue(then.score) : "n/a",
+        then ? h("div", { class: "sub-line muted", text: `${then.basis_close} close` }) : null),
+      PARTS.map((k) => partCell(states[k])),
+      firingCell(then?.firing ?? []));
   });
+  const sc = s.score;
+  const nowStates = Object.fromEntries((sc?.components ?? []).map((c) => [c.key, c.state]));
+  const nowFiring = (sc?.unscored ?? []).filter((u) => u.state || u.risk).map((u) => ({ name: u.name, bias: u.state ?? 0, risk: u.risk, headline: u.headline }));
+  const now = sc && finite(sc.value) ? h("tr", { class: "trades__now" },
+    h("td", {}), h("td", { text: "Now" }), h("td", {}), h("td", { class: "num", text: usd(price) }), h("td", {}),
+    h("td", {}, scoreValue(sc.value), h("div", { class: "sub-line muted", text: `${s.close_date} close` })),
+    PARTS.map((k) => partCell(nowStates[k])), firingCell(nowFiring)) : null;
+  const head = h("thead", {}, h("tr", {},
+    h("th", { class: "num", text: "#" }), h("th", { text: "Opened" }), h("th", { class: "num", text: "ETH open" }),
+    h("th", { class: "num", text: "Price" }), h("th", { class: "num", text: "Since" }), h("th", { text: "Score then" }),
+    h("th", { text: "Mom." , title: "Momentum, 7 and 28 days" }), h("th", { text: "Trend", title: "Trend, 20 vs 50 days" }),
+    h("th", { text: "200d", title: "Long trend, 200 days" }), h("th", { text: "Vol.", title: "Volume pressure, 10 days" }),
+    h("th", { text: "Other signals firing" })));
   return h("div", { class: "trades" },
-    h("h3", { class: "sub", text: trades.length === 1 ? "The open trade" : `The ${trades.length} open trades, oldest first` }),
-    h("ul", { class: "trades__list" }, rows),
+    h("h3", { class: "sub", text: trades.length === 1 ? "The open trade, and the signals now" : `The ${trades.length} open trades, oldest first, and the signals now` }),
+    h("div", { class: "scroll" }, h("table", { class: "tbl trades-table", "data-trades": "" }, head, h("tbody", {}, rows, now))),
+    h("p", { class: "note", text: "Hover a row, or its numbered marker on the signal score chart, to pick it out in both. " +
+      "Columns: momentum, trend, 200-day trend and volume pressure (the scored parts), then the unscored signals that were firing; hover a chip for its reading." }),
     p.trades_complete === false ? h("p", { class: "note", text:
       "The trades read do not reach back to when this position was opened; the first row is the part opened before them." }) : null,
     p.trades_source === "filled orders" ? h("p", { class: "note", text:
@@ -635,7 +675,7 @@ function trail(row) {
 let scoreRange = 90;
 const RANGES = [[90, "3 months"], [365, "1 year"]];
 
-function scorePriceChart(history) {
+function scorePriceChart(history, trades = []) {
   const days = history.slice(-scoreRange);
   const n = days.length;
   if (n < 2) return null;
@@ -663,7 +703,7 @@ function scorePriceChart(history) {
   const ticks = [0, Math.floor((n - 1) / 2), n - 1].map((i, k) =>
     text({ x: x(i).toFixed(1), y: H - 5, "text-anchor": k === 0 ? "start" : k === 2 ? "end" : "middle", class: "sp__axis" }, shortDate(days[i].date)));
   const last = days[n - 1];
-  return svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "sp", role: "img",
+  return svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "sp", role: "img", "data-trades": "",
     "aria-label": `Signal score and ETH close over ${n} days: score from ${signedFixed(days[0].score)} to ${signedFixed(last.score)}, ` +
       `ETH from ${usd(days[0].close, 0)} to ${usd(last.close, 0)}` },
   svg("rect", { x: L, y: ys(0.2).toFixed(1), width: pw, height: (ys(-0.2) - ys(0.2)).toFixed(1), class: "sp__band" }),
@@ -674,7 +714,35 @@ function scorePriceChart(history) {
   finite(last.close) ? svg("circle", { cx: x(n - 1).toFixed(1), cy: yp(last.close).toFixed(1), r: 3.2, class: "sp__now" }) : null,
   priceLabels(closes, last.close, yp, L + pw + 6, T + 9, T + ph).map(([y, t, now]) =>
     text({ x: L + pw + 6, y: y.toFixed(1), class: now ? "sp__axis sp__axis--now" : "sp__axis" }, t)),
-  ticks, hits);
+  ticks, hits, tradeMarkers(trades, days, x, L + pw, T, ph, step));
+}
+
+// A numbered marker and a dashed line at each open trade's day; a trade made since the last close sits at the
+// right edge. Hovering one picks out its row in the open-trades table.
+function tradeMarkers(trades, days, x, right, top, height, step) {
+  const first = days[0]?.date, last = days[days.length - 1]?.date;
+  return trades.map(({ n, t }) => {
+    const day = (t.time ?? "").slice(0, 10);
+    if (!day || day < first) return null;
+    const i = days.findIndex((d) => d.date === day);
+    const cx = i >= 0 ? x(i) : day > last ? right - 7 : null;
+    if (cx === null) return null;
+    const label = `Trade ${n}: ${t.time ? utcTime(t.time) : day}` + (finite(t.signals?.score) ? `, score then ${signedFixed(t.signals.score)}` : "");
+    return svg("g", { class: "sp__trade", "data-trade": String(n), tabindex: 0, role: "img", "aria-label": label },
+    svg("title", {}, document.createTextNode(label)),
+    svg("line", { x1: cx.toFixed(1), x2: cx.toFixed(1), y1: top + 16, y2: top + height, class: "sp__trade-line" }),
+    svg("rect", { x: (cx - Math.max(step, 10) / 2).toFixed(1), y: top, width: Math.max(step, 10).toFixed(1), height, class: "sp__trade-hit" }),
+    svg("circle", { cx: cx.toFixed(1), cy: top + 8, r: 7.5, class: "sp__trade-dot" }),
+    svg("text", { x: cx.toFixed(1), y: top + 11.5, "text-anchor": "middle", class: "sp__trade-n" }, document.createTextNode(String(n))));
+  }).map((g) => {
+    if (!g) return null;
+    const n = Number(g.getAttribute("data-trade"));
+    g.addEventListener("mouseenter", () => focusTrade(n));
+    g.addEventListener("mouseleave", () => focusTrade(null));
+    g.addEventListener("focus", () => focusTrade(n));
+    g.addEventListener("blur", () => focusTrade(null));
+    return g;
+  });
 }
 
 // The right axis: the period's high and low, and today's close beside its point; a high or low label that
@@ -686,7 +754,7 @@ function priceLabels(closes, now, yp, x, top, bottom) {
   return [...labels.filter(([ly]) => Math.abs(ly - y) >= 12), [y, usd(now, 0), true]];
 }
 
-function scoreChartBlock(history) {
+function scoreChartBlock(history, trades = []) {
   const box = h("div", { class: "sp-wrap" });
   const draw = () => {
     const buttons = RANGES.filter(([d]) => d <= Math.max(90, history.length)).map(([d, t]) => {
@@ -700,7 +768,7 @@ function scoreChartBlock(history) {
           h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__bars", "aria-hidden": "true" }), "Signal score (left axis)"),
           h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__line", "aria-hidden": "true" }), "ETH daily close (right axis)")),
         h("div", { class: "seg", role: "group", "aria-label": "Chart range" }, buttons)),
-      scorePriceChart(history));
+      scorePriceChart(history, trades));
   };
   draw();
   return box;
@@ -759,7 +827,7 @@ function renderScore(s) {
     "so a line heading for a dashed line is a signal weakening before it turns. Momentum and trend draw a thin second line ",
     "(the 7-day return; the 20-day against the 50-day): their state needs both on the same side of zero. ",
     "An amber ring marks a risk flag that day. Hover a line for its values. \u201cAdds\u201d is each signal's share of today's score.");
-  const overlay = h("div", { class: "score__overlay" }, scoreChartBlock(sc.history),
+  const overlay = h("div", { class: "score__overlay" }, scoreChartBlock(sc.history, tradeList(s)),
     h("p", { class: "note", text: "Read the bars against the line, not as a forecast of it: on ETH's history the score " +
       "mostly echoes the last few weeks of price (its correlation with the past 28 days' return is about +0.84) and " +
       "barely leads the next 30 (about +0.10 since 2021). It turns after a top or bottom, typically 1 to 4 weeks late." }));

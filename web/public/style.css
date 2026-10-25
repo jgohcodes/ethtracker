@@ -174,7 +174,7 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
 .ladder tr[data-kind="yours"] td:first-child::before { content: "◆ "; color: var(--ink-2); font-size: 10px; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
 .tbl td.num, .tbl td.nowrap { white-space: nowrap; }
-.scroll { overflow-x: auto; }
+.scroll { overflow-x: auto; position: relative; } /* relative: hidden screen-reader text stays inside */
 
 /* plan, floor risk, market state, signal odds */
 @media (min-width: 900px) { .split--even:not(:has(> [hidden])) { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
@@ -238,23 +238,37 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
 .sp__hit { fill: transparent; }
 .sp__hit:hover { fill: var(--ink); fill-opacity: 0.06; }
 .trades { margin-top: 10px; }
-.trades__list { list-style: none; padding: 0; margin: 0; }
-.trade { border-top: 1px solid var(--hair); padding: 10px 0; }
-.trade__head { display: flex; flex-wrap: wrap; gap: 4px 14px; font-weight: 550; font-variant-numeric: tabular-nums; }
-.trade__when { color: var(--ink-2); font-weight: 500; }
-.trade__score { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.trade__when { color: var(--ink-2); white-space: nowrap; }
+.trades-table th, .trades-table td { vertical-align: middle; padding: 8px 10px; }
+.trades-table .score-inline { flex-wrap: nowrap; white-space: nowrap; }
+.trades-table tbody tr[data-trade] { cursor: default; transition: opacity 0.12s; }
+.trades-table tbody tr[data-trade]:focus { outline: 2px solid var(--focus); outline-offset: -2px; }
+.trades-table tr.is-focus td { background: var(--surface-2); }
+.trades-table .part-cell { text-align: center; }
+.trades-table .part-cell .state__glyph { margin: 0; font-size: 12px; }
+.part-cell[data-sign="up"] .state__glyph { color: var(--good); }
+.part-cell[data-sign="down"] .state__glyph { color: var(--critical); }
+.part-cell[data-sign="flat"] .state__glyph { color: var(--muted); }
+.trades__now td { border-top: 2px solid var(--hair); color: var(--ink-2); }
+.trade-no { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 999px;
+  background: var(--ink); color: var(--page); font-size: 11.5px; font-weight: 650; }
+.firing { min-width: 220px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; margin: 2px 6px 2px 0;
+  padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
+.chip__glyph { font-size: 10px; }
+.chip[data-sign="up"] .chip__glyph { color: var(--good); }
+.chip[data-sign="down"] .chip__glyph { color: var(--critical); }
+.chip[data-sign="flat"] .chip__glyph { color: var(--warning); }
+.has-focus [data-trade]:not(.is-focus) { opacity: 0.28; }
+.sp__trade { cursor: default; outline: none; }
+.sp__trade-line { stroke: var(--ink); stroke-width: 1.2; stroke-dasharray: 3 3; }
+.sp__trade-hit { fill: transparent; }
+.sp__trade-dot { fill: var(--ink); stroke: var(--surface); stroke-width: 1.5; }
+.sp__trade-n { fill: var(--page); font-size: 10px; font-weight: 700; pointer-events: none; }
+.sp__trade.is-focus .sp__trade-line { stroke-width: 2; stroke-dasharray: none; }
+.sp__trade:focus-visible .sp__trade-dot { stroke: var(--focus); stroke-width: 2.5; }
 .score-inline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-variant-numeric: tabular-nums; overflow-wrap: normal; }
 .score-inline__n { white-space: nowrap; }
-.trade__parts { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 13px; }
-.part__glyph { font-size: 10px; margin-right: 4px; }
-.part[data-sign="up"] .part__glyph { color: var(--good); }
-.part[data-sign="down"] .part__glyph { color: var(--critical); }
-.part[data-sign="flat"] .part__glyph { color: var(--muted); }
-.trade__sigs { list-style: none; padding: 0; margin: 6px 0 0; font-size: 13px; color: var(--ink-2); }
-.trade__sig { display: flex; gap: 6px; align-items: baseline; }
-.trade__sig + .trade__sig { margin-top: 2px; }
-.trade__sig[data-sign="up"] .sig__glyph { color: var(--good); }
-.trade__sig[data-sign="down"] .sig__glyph { color: var(--critical); }
 .sp-key__item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; margin-right: 10px; }
 .line { display: block; overflow: visible; }
 .line__flip { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.55; }

@@ -5,7 +5,7 @@ import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, FRESH_SECONDS, STALE_SECONDS, ACTIONS, freshnessThresholds, describeInterval,
   chance, eth, funding8h, SCORE, signedFixed, stateWord, stripSummary, PLAN_STATUS, TREND, CROWDING, lookup, reading, lineSummary,
-  shortDate, utcTime, scoreLabel,
+  shortDate, shortTime, utcTime, scoreLabel,
 } from "../public/format.mjs";
 
 test("money formatting groups thousands, signs deltas and survives missing values", () => {
@@ -191,6 +191,7 @@ test("a signal's reading prints in its own unit and its line reads aloud with wh
 test("axis dates, exchange times and score words", () => {
   assert.deepEqual([shortDate("2026-07-27"), shortDate("2026-01-01T00:00:00Z"), shortDate(null)], ["27 Jul", "1 Jan", ""]);
   assert.deepEqual([utcTime("2026-10-25T17:02:11.123456Z"), utcTime("bad")], ["2026-10-25 17:02 UTC", ""]);
+  assert.deepEqual([shortTime("2026-10-25T18:02:11Z"), shortTime("2026-10-25")], ["25 Oct 18:02", ""]);
   assert.deepEqual([-0.54, -0.5, -0.2, 0, 0.2, 0.5, 0.51, null].map(scoreLabel),
     ["Strongly negative", "Strongly negative", "Leaning negative", "Neutral", "Neutral", "Leaning positive", "Strongly positive", null]);
 });
