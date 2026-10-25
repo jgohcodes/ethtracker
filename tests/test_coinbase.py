@@ -337,7 +337,23 @@ def test_the_check_compares_fills_with_the_position_without_amounts():
             return super().get(path, params)
     lines = "\n".join(coinbase.probe(Partial()))
     assert "open trades rebuilt from fills: older fills needed" in lines
-    assert "product filter used yes, every page read yes, same product id as the position yes" in lines
+    assert "product filter used yes, every page read yes; position product ETH-PERP-INTX, fill products ETH-PERP-INTX" in lines
     assert "kinds FILL; sides buy; sized in quote currency no" in lines and "net bought / position size = 0.5;" in lines
     for secret in ("4.5321", "2.266", "2311", UUID):
         assert secret not in lines, secret
+
+
+def test_fills_named_differently_from_the_position_still_rebuild_its_trades():
+    class Renamed(FakeClient):
+        def get(self, path, params=None):
+            if path.endswith("/fills"):
+                if params.get("product_ids"):
+                    return 200, {"fills": [], "cursor": ""}  # the filter knows the fills by another name
+                return 200, {"fills": [{"product_id": "ETH-PERP", "side": "BUY", "size": "4.5321", "price": "2311.17",
+                                        "trade_time": "2026-10-25T17:02:11Z", "order_id": "o", "trade_type": "FILL"}], "cursor": ""}
+            return super().get(path, params)
+    (p,) = coinbase.account(Renamed())["positions"]
+    assert p["trades_complete"] and p["trades"][0]["price"] == pytest.approx(2311.17)
+    lines = "\n".join(coinbase.probe(Renamed()))
+    assert "open trades rebuilt from fills: all found" in lines and "fill products ETH-PERP\n" in lines
+    assert coinbase.fills_for([{"product": "ETH-PERP"}], {"product": "ETH-PERP-INTX"}, 2) == []

@@ -214,15 +214,14 @@ def _fills_against(client: Client, p: dict) -> list[str]:
     """How the fills read compare with the position, without amounts: kinds, units, a ratio and an age bucket."""
     meta: dict = {}
     fills = eth_fills(client, p["product"], meta)
-    same = [f for f in fills if f["product"] == p["product"]]
-    net = sum(f["size"] * (1 if f["side"] == "buy" else -1) for f in same if f["size"])
-    oldest = min((pd_time(f["time"]) for f in same if f["time"]), default=None)
+    net = sum(f["size"] * (1 if f["side"] == "buy" else -1) for f in fills if f["size"])
+    oldest = min((pd_time(f["time"]) for f in fills if f["time"]), default=None)
     age = None if oldest is None else (time.time() - oldest) / 86400
     bucket = "none" if age is None else "under 2 days" if age < 2 else "under 2 weeks" if age < 14 else "under 3 months" if age < 92 else "older"
     ratio = net / p["size"] if p.get("size") else None
     return [
-        f"fills: product filter used {'yes' if meta.get('filtered') else 'no'}, every page read {'yes' if meta.get('ended') else 'no'}, "
-        f"same product id as the position {'yes' if len(same) == len(fills) and fills else 'no' if fills else 'n/a'}",
+        f"fills: product filter used {'yes' if meta.get('filtered') else 'no'}, every page read {'yes' if meta.get('ended') else 'no'}; "
+        f"position product {p['product']}, fill products {', '.join(sorted({str(f['product']) for f in fills})) or 'none'}",
         f"fills: kinds {', '.join(sorted({f['type'] or '?' for f in fills})) or 'none'}; sides {', '.join(sorted({f['side'] or '?' for f in fills})) or 'none'}; "
         f"sized in quote currency {', '.join(sorted({'yes' if f['in_quote'] else 'no' for f in fills})) or 'n/a'}",
         f"fills: net bought / position size = {'n/a' if ratio is None else f'{ratio:.2g}'}; oldest fill read: {bucket}",
@@ -405,6 +404,12 @@ def eth_fills(client: Client, product: str | None, meta: dict | None = None) -> 
     return fills
 
 
+def fills_for(fills: list[dict], position: dict, eth_positions: int) -> list[dict]:
+    """The fills of one position. Coinbase can name a perpetual differently in its fills and its positions, so
+    with a single ETH perpetual position every ETH perpetual fill is its own; with several, names must match."""
+    return fills if eth_positions == 1 else [f for f in fills if f["product"] == position["product"]]
+
+
 def open_trades(fills: list[dict], net_size: float | None) -> dict:
     """The orders that make up today's position, oldest first, each with what is still open of it.
 
@@ -458,7 +463,7 @@ def account(client: Client) -> dict:
         positions += [position_from(i) for i in body.get("positions", []) if isinstance(i, dict)]
     eth = [p for p in positions if _is_eth_perp({"product_id": p.get("product")})]
     for p in eth:
-        rebuilt = open_trades([f for f in eth_fills(client, p["product"]) if f["product"] == p["product"]], p["size"])
+        rebuilt = open_trades(fills_for(eth_fills(client, p["product"]), p, len(eth)), p["size"])
         p["trades"], p["trades_complete"] = rebuilt["trades"], rebuilt["complete"]
     if held == 1 and len(eth) == 1 and eth[0]["liquidation"] is None and summary:
         eth[0]["liquidation"] = liquidation_from_buffer(eth[0], summary.get("liquidation_buffer"))
