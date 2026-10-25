@@ -225,6 +225,20 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
 .state[data-sign="flat"] .state__glyph { color: var(--muted); }
 .score__table .strip-cell { padding-left: 14px; }
 .score__legend { margin-top: 10px; }
+.line { display: block; overflow: visible; }
+.line__flip { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.55; }
+.line__second { fill: none; stroke: var(--muted); stroke-width: 1; stroke-linejoin: round; opacity: 0.8; }
+.line__step { stroke-width: 1.8; stroke-linecap: round; }
+.line__step--pos { stroke: var(--good); }
+.line__step--neg { stroke: var(--critical); }
+.line__step--flat { stroke: var(--muted); }
+.line__mark { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.2; }
+.line__now { stroke: var(--surface); stroke-width: 1.2; }
+.line__now--pos { fill: var(--good); }
+.line__now--neg { fill: var(--critical); }
+.line__now--flat { fill: var(--muted); }
+.line__risk { fill: none; stroke: var(--warning); stroke-width: 1.4; }
+.state .reading { white-space: nowrap; font-variant-numeric: tabular-nums; }
 @media (max-width: 640px) {
   .score__number { font-size: 32px; }
   /* each signal becomes a small block: its name across the top, then strip, reading, weight and share */
@@ -241,6 +255,7 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
   .score__table td:nth-child(5):empty { display: none; }
   .score__table td[data-label]::before { content: attr(data-label) " "; color: var(--ink-2); font-size: 12px; }
   .score__table td.score__group { grid-column: 1 / -1; padding-top: 12px !important; }
+  .score__table td.state, .state .reading { white-space: normal; min-width: 0; }
 }
 
 .foot { font-size: 12.5px; color: var(--ink-2); max-width: 80ch; }

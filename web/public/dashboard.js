@@ -1,7 +1,7 @@
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, describeInterval, finite, chance, eth, funding8h, PLAN_STATUS, TREND, CROWDING, lookup,
-  SCORE, signedFixed, stateWord, stripSummary,
+  SCORE, signedFixed, stateWord, stripSummary, reading, lineSummary,
 } from "./format.mjs";
 
 const TOKEN_KEY = "ethtracker.viewToken";
@@ -474,6 +474,87 @@ function stripAxis(n) {
       svg("text", { x: at(b), y: 10, "text-anchor": b === 0 ? "end" : b === 14 ? "start" : "middle" }, document.createTextNode(t))));
 }
 
+// A signal's reading over the last 30 days. Each step is coloured by that day's state; dashed lines mark where
+// the state flips, so a line drifting toward one shows a signal weakening before it turns. Momentum and trend
+// add a thin second line: their state needs both lines on the same side of zero. The scale fits the line, never
+// narrower than a move worth seeing in its unit, and takes in a flip level only when it is near.
+const LINE_W = 200, LINE_H = 40, LINE_PAD = 4;
+const MIN_SPAN = { pct: 0.04, share: 0.2, percentile: 0.2, z: 1, index: 10, ratio: 0.2, rate8h: 0.0001 };
+const lineX = (i, n) => LINE_PAD + (n > 1 ? i / (n - 1) : 1) * (LINE_W - 2 * LINE_PAD);
+const tone = (s) => (s > 0 ? "pos" : s < 0 ? "neg" : "flat");
+
+function lineChart(line, states) {
+  const vals = line.values, n = vals.length;
+  const second = line.second?.values ?? [];
+  const flips = (line.thresholds ?? []).filter(finite);
+  const known = [...vals, ...second].filter(finite);
+  if (known.length < 2) return null;
+  let lo = Math.min(...known), hi = Math.max(...known);
+  const least = MIN_SPAN[line.unit] ?? 0;
+  if (hi - lo < least) { const mid = (hi + lo) / 2; lo = mid - least / 2; hi = mid + least / 2; }
+  const reach = (hi - lo) * 0.5;
+  const near = flips.filter((t) => t >= lo - reach && t <= hi + reach);
+  lo = Math.min(lo, ...near); hi = Math.max(hi, ...near);
+  const span = hi - lo || Math.abs(hi) || 1;
+  lo -= span * 0.08; hi += span * 0.08;
+  const x = (i) => lineX(i, n).toFixed(1);
+  const y = (v) => (LINE_PAD + ((hi - v) / (hi - lo)) * (LINE_H - 2 * LINE_PAD)).toFixed(1);
+  const runs = (values) => {  // one polyline per unbroken stretch of readings
+    const out = [];
+    let run = [];
+    values.forEach((v, i) => {
+      if (finite(v)) run.push(`${x(i)},${y(v)}`);
+      else { if (run.length > 1) out.push(run); run = []; }
+    });
+    if (run.length > 1) out.push(run);
+    return out.map((r) => svg("polyline", { points: r.join(" "), class: "line__second" }));
+  };
+  const steps = [];
+  for (let i = 1; i < n; i++) {
+    if (finite(vals[i - 1]) && finite(vals[i])) {
+      steps.push(svg("line", { x1: x(i - 1), y1: y(vals[i - 1]), x2: x(i), y2: y(vals[i]), class: `line__step line__step--${tone(states?.[i])}` }));
+    }
+  }
+  const risks = (line.risks ?? []).map((r, i) => (r && finite(vals[i]) ? svg("circle", { cx: x(i), cy: y(vals[i]), r: 3.2, class: "line__risk" }) : null));
+  const marks = [14, 7, 3].filter((b) => b < n && finite(vals[n - 1 - b]))
+    .map((b) => svg("circle", { cx: x(n - 1 - b), cy: y(vals[n - 1 - b]), r: 1.8, class: "line__mark" }));
+  const last = vals[n - 1];
+  const summary = lineSummary(line) + (line.second ? `. ${lineSummary({ ...line.second, unit: line.unit, thresholds: [] })}` : "");
+  return svg("svg", { viewBox: `0 0 ${LINE_W} ${LINE_H}`, width: LINE_W, height: LINE_H, role: "img", "aria-label": summary, class: "line" },
+    svg("title", {}, document.createTextNode(summary)),
+    near.map((t) => svg("line", { x1: LINE_PAD, x2: LINE_W - LINE_PAD, y1: y(t), y2: y(t), class: "line__flip" })),
+    runs(second), steps, risks, marks,
+    finite(last) ? svg("circle", { cx: x(n - 1), cy: y(last), r: 3, class: `line__now line__now--${tone(states?.[n - 1])}` }) : null);
+}
+
+// The line's header: where 14, 7 and 3 days ago and today fall.
+function lineAxis(n) {
+  return svg("svg", { viewBox: `0 0 ${LINE_W} 12`, width: LINE_W, height: 12, "aria-hidden": "true", class: "strip strip--axis" },
+    [[n - 1, `${n}d`], [14, "14d"], [7, "7d"], [0, "now"]].filter(([b]) => b < n).map(([b, t]) =>
+      svg("text", { x: lineX(n - 1 - b, n).toFixed(1), y: 10, "text-anchor": b === 0 ? "end" : b === n - 1 ? "start" : "middle" },
+        document.createTextNode(t))));
+}
+
+// Today's state, then today's reading against a week ago: the direction of travel within the state.
+function nowCell(state, line) {
+  const cell = stateCell(state);
+  const v = line?.values ?? [], n = v.length;
+  if (!finite(v[n - 1])) return cell;
+  const week = n > 7 && finite(v[n - 8]) ? `, 7d ago ${reading(v[n - 8], line.unit)}` : "";
+  cell.append(h("div", { class: "sub-line reading", text: `${reading(v[n - 1], line.unit)}${week}` }));
+  const s = line.second?.values ?? [];
+  if (finite(s[s.length - 1])) cell.append(h("div", { class: "sub-line reading", text: `${line.second.label} ${reading(s[s.length - 1], line.unit)}` }));
+  return cell;
+}
+
+// The line when there are readings; the old up/down strip for a snapshot made before lines; else a word.
+function trail(row) {
+  const drawn = row.line && lineChart(row.line, row.strip);
+  if (drawn) return drawn;
+  if (!row.line && row.strip?.some((v) => v !== null && v !== undefined)) return strip(row.strip);
+  return h("span", { class: "muted", text: "no data yet" });
+}
+
 function scoreLine(history) {
   const W = 360, H = 64, pad = 4;
   const n = history.length;
@@ -505,7 +586,7 @@ function renderScore(s) {
   $("score-card").hidden = !show;
   if (!show) { $("score").replaceChildren(); return; }
   const info = lookup(SCORE, sc.label);
-  const n = sc.components[0]?.strip.length ?? 15;
+  const n = sc.components[0]?.line?.values.length ?? sc.components[0]?.strip.length ?? 30;
   const cal = sc.calibration;
   const ago = [["14", "14 days ago"], ["7", "7 days ago"], ["3", "3 days ago"]]
     .map(([k, t]) => h("span", { class: "ago" }, h("span", { class: "muted", text: `${t} ` }), signedFixed(sc.ago[k])));
@@ -526,22 +607,26 @@ function renderScore(s) {
   const scored = sc.components.map((c) => h("tr", {},
     h("td", {}, h("div", { text: c.name }), h("div", { class: "sub-line" }, h("span", { class: "tag", text: c.evidence === "failed" ? "failed the check" : `${c.evidence} evidence` }), " ", c.reads)),
     h("td", { class: "num", "data-label": "weight", text: `${Math.round(c.weight * 100)}%` }),
-    h("td", { class: "strip-cell" }, strip(c.strip)),
-    stateCell(c.state),
+    h("td", { class: "strip-cell" }, trail(c)),
+    nowCell(c.state, c.line),
     h("td", { class: "num", "data-label": "adds", text: c.contribution === null ? "n/a" : signedFixed(c.contribution) })));
   const others = (sc.unscored ?? []).map((u) => h("tr", {},
     h("td", {}, h("div", { text: SIGNAL_NAMES[u.name] ?? u.name }), h("div", { class: "sub-line", text: u.headline }),
       u.risk ? badge("warning", "!", "Risk") : null),
     h("td", { class: "num", "data-label": "weight", text: "0%" }),
-    h("td", { class: "strip-cell" }, strip(u.strip)),
-    stateCell(u.state),
+    h("td", { class: "strip-cell" }, trail(u)),
+    nowCell(u.state, u.line),
     h("td", { class: "num", text: "" })));
   const head = h("thead", {}, h("tr", {},
     h("th", { text: "Signal" }), h("th", { class: "num", text: "Weight" }),
-    h("th", { class: "strip-cell" }, h("span", { class: "sr", text: "Last 15 days" }), stripAxis(n)), h("th", { text: "Now" }), h("th", { class: "num", text: "Adds" })));
+    h("th", { class: "strip-cell" }, h("span", { class: "sr", text: `Last ${n} days` }), sc.components[0]?.line ? lineAxis(n) : stripAxis(n)),
+    h("th", { text: "Now" }), h("th", { class: "num", text: "Adds" })));
   const legend = h("p", { class: "note score__legend" },
-    `Strips: the last ${n} days, oldest on the left, today outlined. A bar up is positive, a bar down negative, a dot neutral. `,
-    "\u201cAdds\u201d is each signal's share of today's score.");
+    `Lines: each signal's own reading over the last ${n} days, oldest on the left, dots at 14, 7 and 3 days ago. `,
+    "Colour is that day's state (green positive, red negative, grey neutral) and the dashed lines are where the state flips, ",
+    "so a line heading for a dashed line is a signal weakening before it turns. Momentum and trend draw a thin second line ",
+    "(the 7-day return; the 20-day against the 50-day): their state needs both on the same side of zero. ",
+    "An amber ring marks a risk flag that day. Hover a line for its values. \u201cAdds\u201d is each signal's share of today's score.");
   fill($("score"),
     lead, meaning, legend,
     h("div", { class: "scroll" }, h("table", { class: "tbl score__table" }, head,

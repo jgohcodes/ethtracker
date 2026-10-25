@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, FRESH_SECONDS, STALE_SECONDS, ACTIONS, freshnessThresholds, describeInterval,
-  chance, eth, funding8h, SCORE, signedFixed, stateWord, stripSummary, PLAN_STATUS, TREND, CROWDING, lookup,
+  chance, eth, funding8h, SCORE, signedFixed, stateWord, stripSummary, PLAN_STATUS, TREND, CROWDING, lookup, reading, lineSummary,
 } from "../public/format.mjs";
 
 test("money formatting groups thousands, signs deltas and survives missing values", () => {
@@ -175,4 +175,14 @@ test("under a plan the ladder shows the floor and the liquidation once, not each
   };
   const labels = priceLadder(snap).map((row) => row.label);
   assert.deepEqual(labels, ["Mark", "Average entry", "Plan floor", "Liquidation"]);
+});
+
+test("a signal's reading prints in its own unit and its line reads aloud with where it flips", () => {
+  assert.deepEqual(
+    [reading(-0.1264, "pct"), reading(-0.3333, "share"), reading(0.30, "percentile"), reading(0.91, "percentile"),
+      reading(0.12, "percentile"), reading(-1.26, "z"), reading(36.4, "index"), reading(0.97, "ratio"), reading(0.0000071, "rate8h"), reading(null, "pct")],
+    ["−12.6%", "−33%", "30th percentile", "91st percentile", "12th percentile", "−1.3 sd", "36", "0.97x", "+0.0007% / 8h", "n/a"]);
+  const values = Array.from({ length: 30 }, (_, i) => (i - 20) / 100);
+  assert.equal(lineSummary({ label: "28-day return", unit: "pct", values, thresholds: [0] }),
+    "28-day return: 14 days ago −5.0%, 7 days ago +2.0%, 3 days ago +6.0%, now +9.0%; flips at +0.0%");
 });

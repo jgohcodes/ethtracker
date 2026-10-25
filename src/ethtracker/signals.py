@@ -35,6 +35,7 @@ class Signal:
     headline: str
     unvalidated: bool = False
     family: str = ""  # correlated signals share a family and vote once; empty means its own family
+    value: float | None = None  # the reading the rule thresholds (RSI, std devs, % from a level...), for its line
 
 
 # "below the 20d, 50d, 200d, both AVWAPs and the POC" is one fact seen six ways, so those vote once
@@ -182,19 +183,19 @@ def _technical(cfg: Config, df: pd.DataFrame, anchor: pd.Timestamp | None, signa
     z = _f(row["z20"])
     if z is not None:
         if row["ext_hot"]:
-            signals.append(Signal("extension", -1, True, f"Stretched: {z:+.1f} std devs above the 20d mean"))
+            signals.append(Signal("extension", -1, True, f"Stretched: {z:+.1f} std devs above the 20d mean", value=z))
         elif z <= -cfg.extension_z:
-            signals.append(Signal("extension", 1, False, f"Far below the 20d mean: {z:+.1f} std devs"))
+            signals.append(Signal("extension", 1, False, f"Far below the 20d mean: {z:+.1f} std devs", value=z))
         else:
-            signals.append(Signal("extension", 0, False, f"Not stretched: {z:+.1f} std devs from the 20d mean"))
+            signals.append(Signal("extension", 0, False, f"Not stretched: {z:+.1f} std devs from the 20d mean", value=z))
     rsi = _f(row["rsi"])
     if rsi is not None:
         bias = -1 if rsi >= cfg.rsi_overbought else (1 if rsi <= cfg.rsi_oversold else 0)
         word = {-1: f"at or over {cfg.rsi_overbought:.0f}", 1: f"at or under {cfg.rsi_oversold:.0f}", 0: "neutral"}[bias]
-        signals.append(Signal("rsi", bias, bool(row["rsi_hot"]), f"RSI {rsi:.0f}: {word}"))
+        signals.append(Signal("rsi", bias, bool(row["rsi_hot"]), f"RSI {rsi:.0f}: {word}", value=rsi))
         peak = _f(row["rsi_peak"])
         if peak is not None and peak >= cfg.rsi_overbought and rsi < peak - ROLLOVER_POINTS:
-            signals.append(Signal("rsi_rollover", -1, False, f"Momentum rolling over: RSI 10d high {peak:.0f}, now {rsi:.0f}"))
+            signals.append(Signal("rsi_rollover", -1, False, f"Momentum rolling over: RSI 10d high {peak:.0f}, now {rsi:.0f}", value=rsi))
 
     vol_ratio, atr_ratio, range_ratio = (_f(row[k]) for k in ("vol_ratio", "atr_ratio", "range_ratio"))
     if vol_ratio is not None or atr_ratio is not None:
@@ -206,7 +207,8 @@ def _technical(cfg: Config, df: pd.DataFrame, anchor: pd.Timestamp | None, signa
         if range_ratio is not None:
             parts.append(f"latest range {range_ratio:.1f}x ATR")
         state = "Volatility spiking" if row["vol_spike"] else "Volatility normal"
-        signals.append(Signal("volatility", 0, bool(row["vol_spike"]), f"{state}: {'; '.join(parts)}"))
+        signals.append(Signal("volatility", 0, bool(row["vol_spike"]), f"{state}: {'; '.join(parts)}",
+                              value=max(v for v in (vol_ratio, atr_ratio) if v is not None)))
     else:
         notes.append("volatility signals need about 40 daily candles")
 
@@ -222,12 +224,14 @@ def _technical(cfg: Config, df: pd.DataFrame, anchor: pd.Timestamp | None, signa
             if v is not None:
                 levels[name] = v
                 above = price > v
-                signals.append(Signal(name, 1 if above else -1, False, f"{'Above' if above else 'Below'} AVWAP from {label} ({when:%Y-%m-%d}): ${v:,.0f}, {price / v - 1:+.1%}"))
+                signals.append(Signal(name, 1 if above else -1, False, f"{'Above' if above else 'Below'} AVWAP from {label} ({when:%Y-%m-%d}): ${v:,.0f}, {price / v - 1:+.1%}",
+                                      value=price / v - 1))
         prof = volume_profile(df)
         if prof is not None:
             levels.update(poc=prof.poc, vah=prof.vah, val=prof.val)
             above = price > prof.poc
-            signals.append(Signal("poc", 1 if above else -1, False, f"{'Above' if above else 'Below'} the 365d point of control (${prof.poc:,.0f}); value area ${prof.val:,.0f} to ${prof.vah:,.0f}"))
+            signals.append(Signal("poc", 1 if above else -1, False, f"{'Above' if above else 'Below'} the 365d point of control (${prof.poc:,.0f}); value area ${prof.val:,.0f} to ${prof.vah:,.0f}",
+                                  value=price / prof.poc - 1))
         else:
             notes.append("volume profile needs 20 candles with volume")
 
@@ -256,11 +260,11 @@ def _derivatives(cfg: Config, derivs: pd.DataFrame | None, price_change: float |
         f = float(derivs["funding_8h"].dropna().iloc[-1])
         hot = cfg.funding_hot_8h
         if f >= hot:
-            signals.append(Signal("funding", -1, True, f"Funding {f:.3%} per 8h (>= {hot:.3%}): longs paying heavily, crowded", True))
+            signals.append(Signal("funding", -1, True, f"Funding {f:.3%} per 8h (>= {hot:.3%}): longs paying heavily, crowded", True, value=f))
         elif f <= -hot:
-            signals.append(Signal("funding", 1, True, f"Funding {f:.3%} per 8h (<= -{hot:.3%}): shorts paying heavily, squeeze risk", True))
+            signals.append(Signal("funding", 1, True, f"Funding {f:.3%} per 8h (<= -{hot:.3%}): shorts paying heavily, squeeze risk", True, value=f))
         else:
-            signals.append(Signal("funding", 0, False, f"Funding {f:.3%} per 8h: not extreme (threshold {hot:.3%})", True))
+            signals.append(Signal("funding", 0, False, f"Funding {f:.3%} per 8h: not extreme (threshold {hot:.3%})", True, value=f))
     else:
         notes.append("no funding data")
 
@@ -282,13 +286,13 @@ def _derivatives(cfg: Config, derivs: pd.DataFrame | None, price_change: float |
                 text, bias = (f"OI {change:+.1%}{move}: short covering, a weak rally", 0) if up else (f"OI {change:+.1%}{move}: leverage being flushed out", 0)
             else:
                 text, bias = f"OI {change:+.1%} in 24h{move}: no spike (threshold {thr:.0%})", 0
-            signals.append(Signal("oi_change", bias, False, text, True))
+            signals.append(Signal("oi_change", bias, False, text, True, value=change))
         daily = oi.resample("1D").last().dropna()
         if len(daily) >= MIN_OI_PERCENTILE_DAYS:
             pctile = float((daily <= latest).mean() * 100)
             crowded = pctile >= cfg.oi_high_percentile
             text = f"OI at the {pctile:.0f}th percentile of its {len(daily)}-day history" + (": crowded" if crowded else "")
-            signals.append(Signal("oi_level", 0, crowded, text, True))
+            signals.append(Signal("oi_level", 0, crowded, text, True, value=pctile / 100))
         else:
             notes.append(f"the open-interest percentile needs {MIN_OI_PERCENTILE_DAYS} days of history (have {len(daily)})")
     else:
@@ -309,10 +313,10 @@ def _derivatives(cfg: Config, derivs: pd.DataFrame | None, price_change: float |
         spike = z >= cfg.liq_spike_z
         if label == "Long":
             text = f"Long liquidations spiked (z = {z:.1f}): forced selling" if spike else f"Long liquidations normal (z = {z:.1f})"
-            signals.append(Signal("long_liquidations", 1 if spike else 0, False, text, True))
+            signals.append(Signal("long_liquidations", 1 if spike else 0, False, text, True, value=z))
         else:
             text = f"Short liquidations spiked (z = {z:.1f}): a squeeze is under way, momentum but exhaustion risk" if spike else f"Short liquidations normal (z = {z:.1f})"
-            signals.append(Signal("short_liquidations", 0, spike, text, True))
+            signals.append(Signal("short_liquidations", 0, spike, text, True, value=z))
 
 
 def compute(cfg: Config, df: pd.DataFrame, derivs: pd.DataFrame | None = None, anchor: pd.Timestamp | None = None) -> SignalSet:

@@ -141,6 +141,35 @@ export function stripSummary(strip) {
   return `14 days ago ${at(14)}, 7 days ago ${at(7)}, 3 days ago ${at(3)}, now ${at(0)}`;
 }
 
+const ordinal = (k) => {
+  const tail = k % 100 >= 11 && k % 100 <= 13 ? "th" : { 1: "st", 2: "nd", 3: "rd" }[k % 10] ?? "th";
+  return `${k}${tail}`;
+};
+const minus = (x) => (x < 0 ? "−" : "+");
+
+// A signal's reading in its own unit: a return, std devs, RSI points, a percentile...
+export function reading(x, unit) {
+  if (!finite(x)) return "n/a";
+  switch (unit) {
+    case "pct": return `${minus(x)}${(Math.abs(x) * 100).toFixed(1)}%`;
+    case "share": return `${minus(x)}${(Math.abs(x) * 100).toFixed(0)}%`;
+    case "percentile": return `${ordinal(Math.round(x * 100))} percentile`;
+    case "z": return `${minus(x)}${Math.abs(x).toFixed(1)} sd`;
+    case "index": return x.toFixed(0);
+    case "ratio": return `${x.toFixed(2)}x`;
+    case "rate8h": return `${minus(x)}${(Math.abs(x) * 100).toFixed(4)}% / 8h`;
+    default: return String(x);
+  }
+}
+
+// "28-day return: 14 days ago +3.1%, 7 days ago −4.0%, 3 days ago −9.9%, now −12.6%; flips at +0.0%": a line read aloud.
+export function lineSummary(line) {
+  const v = line.values, n = v.length;
+  const at = (back) => reading(n - 1 - back >= 0 ? v[n - 1 - back] : null, line.unit);
+  const flips = (line.thresholds ?? []).map((t) => reading(t, line.unit)).join(" and ");
+  return `${line.label}: 14 days ago ${at(14)}, 7 days ago ${at(7)}, 3 days ago ${at(3)}, now ${at(0)}` + (flips ? `; flips at ${flips}` : "");
+}
+
 export function lookup(table, key) {
   return table[key] ?? { tone: "muted", icon: "?", label: String(key) };
 }

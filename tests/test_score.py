@@ -154,3 +154,39 @@ def test_a_swing_the_score_never_turned_for_is_marked_not_given_a_lag():
     rows = score.turns(df["close"], bearish)
     bounce = [r for r in rows if r["kind"] == "bottom"][0]
     assert bounce["flip"] is None and bounce["lag"] is None
+
+
+def test_each_scored_line_sits_on_the_side_of_its_thresholds_that_its_state_says():
+    df = synthetic_candles(700, seed=21)
+    funding = pd.Series(np.random.default_rng(3).normal(0.0001, 0.0001, len(df)), index=df.index)
+    st, rd = score.states(CFG, df, funding), score.readings(df, funding)
+    lo, hi = score.LINES["volume"][3]
+    checks = {
+        "momentum": (lambda d: (rd["momentum"] > 0) & (rd["momentum_2"] > 0), lambda d: (rd["momentum"] < 0) & (rd["momentum_2"] < 0)),
+        "trend": (lambda d: (rd["trend"] > 0) & (rd["trend_2"] > 0), lambda d: (rd["trend"] < 0) & (rd["trend_2"] < 0)),
+        "long_trend": (lambda d: rd["long_trend"] > 0, lambda d: rd["long_trend"] < 0),
+        "volume": (lambda d: rd["volume"] >= hi - 1e-9, lambda d: rd["volume"] <= lo + 1e-9),
+        "crowding": (None, lambda d: rd["crowding"] >= score.CROWDED),
+    }
+    for key, (pos, neg) in checks.items():
+        if pos is not None:
+            assert (st[key] == 1).any() and pos(None)[st[key] == 1].all(), key
+        assert (st[key] == -1).any() and neg(None)[st[key] == -1].all(), key
+        assert rd[key].notna().sum() >= st[key].notna().sum() - 1, key  # a line wherever there is a state
+
+
+def test_the_block_draws_a_line_for_every_signal_with_its_thresholds():
+    df = synthetic_candles(900, seed=6)
+    funding = pd.Series(0.0001, index=df.index)
+    b = score.block(CFG, df, funding, df, None)
+    today = score.readings(df, funding).iloc[-1]
+    for c in b["components"]:
+        line = c["line"]
+        assert len(line["values"]) == score.STRIP_DAYS and line["thresholds"] and line["unit"]
+        assert line["values"][-1] == pytest.approx(today[c["key"]], rel=1e-5), c["key"]
+        assert (line["second"] is not None) == (c["key"] in ("momentum", "trend"))
+    rsi = next(u for u in b["unscored"] if u["name"] == "rsi")
+    assert rsi["line"]["thresholds"] == [CFG.rsi_oversold, CFG.rsi_overbought] and len(rsi["line"]["risks"]) == score.STRIP_DAYS
+    assert f"RSI {rsi['line']['values'][-1]:.0f}" in rsi["headline"]
+    vol = next(u for u in b["unscored"] if u["name"] == "volatility")
+    assert all(s == 0 for s in vol["strip"] if s is not None) and vol["line"]["values"][-1] > 0

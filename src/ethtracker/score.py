@@ -33,7 +33,7 @@ import pandas as pd
 
 from . import indicators, signals
 
-STRIP_DAYS = 15  # today and the 14 days before it
+STRIP_DAYS = 30  # each signal's line: today and the 29 days before it
 HISTORY_DAYS = 90
 HORIZON = 30
 FELL = 0.10
@@ -89,10 +89,31 @@ def _daily_funding(index: pd.DatetimeIndex, funding8h: pd.Series | None) -> pd.S
     return f.groupby(level=0).mean().reindex(index)
 
 
+def _volume_split(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Volume on up days and on down days over the last 10, and whether 10 days of changes exist yet."""
+    change = df["close"].diff()
+    up = df["volume"].where(change > 0, 0.0).rolling(10).sum()
+    down = df["volume"].where(change < 0, 0.0).rolling(10).sum()
+    return up, down, change.rolling(10).count() >= 10
+
+
+def _funding_percentile(index: pd.DatetimeIndex, funding8h: pd.Series | None) -> pd.Series | None:
+    """Each day's funding as a percentile of its past year (NaN until 30 days are known)."""
+    daily = _daily_funding(index, funding8h)
+    if daily is None:
+        return None
+
+    def pct(window):
+        last = window[-1]
+        seen = window[~np.isnan(window)]
+        return np.nan if np.isnan(last) or len(seen) < 30 else float((seen <= last).mean())
+    return daily.rolling(FUNDING_YEAR, min_periods=1).apply(pct, raw=True)
+
+
 def states(cfg, df: pd.DataFrame, funding8h: pd.Series | None = None) -> pd.DataFrame:
     """Each scored component's state for every day: +1, 0 or -1, NaN where it cannot be read yet.
     The trend, long-trend and volume states are the same rules as the dashboard's signals of those names."""
-    close, volume = df["close"], df["volume"]
+    close = df["close"]
     out = pd.DataFrame(index=df.index)
 
     r7, r28 = close / close.shift(7) - 1, close / close.shift(28) - 1
@@ -104,26 +125,66 @@ def states(cfg, df: pd.DataFrame, funding8h: pd.Series | None = None) -> pd.Data
     out["trend"] = np.where(s50.isna(), np.nan, trend)
     out["long_trend"] = np.where(s200.isna(), np.nan, np.where(close > s200, 1.0, -1.0))
 
-    change = close.diff()
-    up = volume.where(change > 0, 0.0).rolling(10).sum()
-    down = volume.where(change < 0, 0.0).rolling(10).sum()
+    up, down, ready = _volume_split(df)
     ratio = down / up.replace(0, np.nan)
     both = (up > 0) & (down > 0)
     r = signals.VOLUME_PRESSURE_RATIO
     vol = np.where(both & (ratio >= r), -1.0, np.where(both & (ratio <= 1 / r), 1.0, 0.0))
-    out["volume"] = np.where(change.rolling(10).count() < 10, np.nan, vol)
+    out["volume"] = np.where(ready, vol, np.nan)
 
-    daily = _daily_funding(df.index, funding8h)
-    if daily is None:
-        out["crowding"] = np.nan
-    else:
-        def pct(window):
-            last = window[-1]
-            seen = window[~np.isnan(window)]
-            return np.nan if np.isnan(last) or len(seen) < 30 else float((seen <= last).mean())
-        p = daily.rolling(FUNDING_YEAR, min_periods=1).apply(pct, raw=True)
-        out["crowding"] = np.where(p.isna(), np.nan, np.where(p >= CROWDED, -1.0, 0.0))
+    p = _funding_percentile(df.index, funding8h)
+    out["crowding"] = np.nan if p is None else np.where(p.isna(), np.nan, np.where(p >= CROWDED, -1.0, 0.0))
     return out
+
+
+# What each scored component's line plots: the reading its rule thresholds, so a line drifting toward a
+# threshold shows a state weakening before it flips. (key: unit, the line, a second line, where the state flips)
+_R = signals.VOLUME_PRESSURE_RATIO
+LINES = {
+    "momentum": ("pct", "28-day return", "7-day return", (0.0,)),
+    "trend": ("pct", "price vs the 50-day", "20-day vs the 50-day", (0.0,)),
+    "long_trend": ("pct", "price vs the 200-day", None, (0.0,)),
+    "volume": ("share", "up-day minus down-day share of 10-day volume", None, (-(_R - 1) / (_R + 1), (_R - 1) / (_R + 1))),
+    "crowding": ("percentile", "funding's percentile of its past year", None, (CROWDED,)),
+}
+
+
+def readings(df: pd.DataFrame, funding8h: pd.Series | None = None) -> pd.DataFrame:
+    """The continuous readings behind each scored state, one column per line in ``LINES`` (``key`` and
+    ``key_2`` for a second line). Their signs against the thresholds give the states."""
+    close = df["close"]
+    s20, s50, s200 = (indicators.sma(close, w) for w in (20, 50, 200))
+    up, down, ready = _volume_split(df)
+    p = _funding_percentile(df.index, funding8h)
+    return pd.DataFrame({
+        "momentum": close / close.shift(28) - 1, "momentum_2": close / close.shift(7) - 1,
+        "trend": close / s50 - 1, "trend_2": s20 / s50 - 1,
+        "long_trend": close / s200 - 1,
+        "volume": ((up - down) / (up + down).replace(0, np.nan)).where(ready),
+        "crowding": np.nan if p is None else p,
+    }, index=df.index)
+
+
+def unscored_lines(cfg) -> dict[str, tuple[str, str, tuple[float, ...]]]:
+    """The same for the unscored signals: unit, what the line is, and where the signal's reading flips."""
+    return {
+        "rsi": ("index", "RSI, 14 days", (cfg.rsi_oversold, cfg.rsi_overbought)),
+        "rsi_rollover": ("index", "RSI, 14 days", (cfg.rsi_overbought,)),
+        "extension": ("z", "std devs from the 20-day mean", (-cfg.extension_z, cfg.extension_z)),
+        "volatility": ("ratio", "the higher of 7d/30d realised vol and ATR/its 180d median", (cfg.vol_spike_ratio,)),
+        "avwap_low": ("pct", "price vs the AVWAP", (0.0,)),
+        "avwap_year": ("pct", "price vs the AVWAP", (0.0,)),
+        "poc": ("pct", "price vs the point of control", (0.0,)),
+        "funding": ("rate8h", "funding per 8 hours", (-cfg.funding_hot_8h, cfg.funding_hot_8h)),
+        "oi_change": ("pct", "open interest, 24-hour change", (-cfg.oi_spike_pct / 100, cfg.oi_spike_pct / 100)),
+        "oi_level": ("percentile", "open interest's percentile of its history", (cfg.oi_high_percentile / 100,)),
+        "long_liquidations": ("z", "std devs above the 60-day mean", (cfg.liq_spike_z,)),
+        "short_liquidations": ("z", "std devs above the 60-day mean", (cfg.liq_spike_z,)),
+    }
+
+
+def _value(v) -> float | None:
+    return None if v is None or pd.isna(v) else float(f"{float(v):.6g}")
 
 
 def combine(st: pd.DataFrame, weights: dict[str, float] = WEIGHTS) -> pd.Series:
@@ -197,8 +258,9 @@ def calibration(df: pd.DataFrame, score: pd.Series, value: float, horizon: int =
 
 def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.DataFrame, derivs: pd.DataFrame | None) -> dict:
     """The dashboard's signal score: today's value and label, its 90-day path, what similar scores led to, every
-    scored component with its weight and 15-day strip, and the unscored signals with their strips."""
+    scored component with its weight, 30-day line and daily states, and the unscored signals the same way."""
     st = states(cfg, history, funding8h)
+    rd = readings(history, funding8h).tail(STRIP_DAYS)
     score = combine(st)
     today = float(score.iloc[-1]) if pd.notna(score.iloc[-1]) else None
     path = score.tail(HISTORY_DAYS)
@@ -207,12 +269,15 @@ def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.Dat
     for c in COMPONENTS:
         strip = st[c.key].tail(STRIP_DAYS)
         now = strip.iloc[-1]
+        unit, name, second, flips = LINES[c.key]
         components.append({
             "key": c.key, "name": c.name, "weight": c.weight, "evidence": c.evidence, "reads": c.reads,
             "state": None if pd.isna(now) else int(now),
             "contribution": None if pd.isna(now) or today is None else float(now * c.weight / sum(
                 w for k, w in WEIGHTS.items() if pd.notna(st[k].iloc[-1]))),
             "strip": [None if pd.isna(v) else int(v) for v in strip],
+            "line": {"unit": unit, "label": name, "values": [_value(v) for v in rd[c.key]], "thresholds": list(flips),
+                     "second": {"label": second, "values": [_value(v) for v in rd[f"{c.key}_2"]]} if second else None},
         })
     return {
         "value": today, "label": label(today) if today is not None else None, "ago": ago,
@@ -227,8 +292,9 @@ SCORED_ELSEWHERE = {"trend", "long_trend", "volume_pressure"}  # the same rules 
 
 
 def unscored(cfg, frame: pd.DataFrame, derivs: pd.DataFrame | None) -> list[dict]:
-    """Every other signal, recomputed as it read on each of the last 15 days, for its strip."""
+    """Every other signal, recomputed as it read on each of the last 30 days, for its line."""
     rows: dict[str, dict] = {}
+    lines = unscored_lines(cfg)
     n = len(frame)
     for back in range(STRIP_DAYS - 1, -1, -1):
         sub = frame.iloc[: n - back]
@@ -239,11 +305,23 @@ def unscored(cfg, frame: pd.DataFrame, derivs: pd.DataFrame | None) -> list[dict
         for g in sigs.signals:
             if g.name in SCORED_ELSEWHERE:
                 continue
-            row = rows.setdefault(g.name, {"name": g.name, "strip": [None] * STRIP_DAYS})
+            row = rows.setdefault(g.name, {"name": g.name, "strip": [None] * STRIP_DAYS, "values": [None] * STRIP_DAYS,
+                                           "risks": [None] * STRIP_DAYS})
             row["strip"][STRIP_DAYS - 1 - back] = g.bias
+            row["values"][STRIP_DAYS - 1 - back] = _value(g.value)
+            row["risks"][STRIP_DAYS - 1 - back] = g.risk
             if back == 0:
                 row.update(state=g.bias, risk=g.risk, headline=g.headline, unvalidated=g.unvalidated)
-    return [r for r in rows.values() if "headline" in r]
+    out = []
+    for r in rows.values():
+        if "headline" not in r:
+            continue
+        values, risks = r.pop("values"), r.pop("risks")
+        if r["name"] in lines and any(v is not None for v in values):
+            unit, name, flips = lines[r["name"]]
+            r["line"] = {"unit": unit, "label": name, "values": values, "thresholds": list(flips), "second": None, "risks": risks}
+        out.append(r)
+    return out
 
 
 # ---- the score against price: echo, lead, and how late it turns -------------------------------------
