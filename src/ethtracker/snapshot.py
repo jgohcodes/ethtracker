@@ -104,7 +104,8 @@ def build(
     sigs = signals.compute(cfg, frame, derivs, anchor)
     floor = journal.plan["floor"] if journal.plan else None
     if floor is not None:  # the plan's floor replaces the swing rules: no time stop, no stress or risk-per-trade limits
-        cfg = replace(cfg, max_holding_days=10**9, stress_drop_pct=0.0, max_open_risk_pct=1e9)
+        cfg = replace(plan.with_plan_margin(cfg, journal.plan), max_holding_days=10**9, stress_drop_pct=0.0,
+                      max_open_risk_pct=1e9)
     statuses = [risk.mark_position(cfg, p, price, now) for p in journal.open_positions()]
     isolated = cfg.margin_mode == "isolated"
 

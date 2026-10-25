@@ -187,7 +187,8 @@ def _long_book(ctx: Ctx, price: float) -> tuple[float, float, float | None]:
 def _print_plan(ctx: Ctx, price: float) -> None:
     total, qty, liq = _long_book(ctx, price)
     s = plan.sizing(ctx.cfg, ctx.journal.plan, price, total, qty, liq)
-    print(f"Plan: liquidation never above {usd(s['floor'])}; add {usd(s['weekly_add'])} a week. Price {usd(price)}.")
+    print(f"Plan: liquidation never above {usd(s['floor'])}; add {usd(s['weekly_add'])} a week. Price {usd(price)}. "
+          f"Maintenance margin {ctx.cfg.maintenance_margin_rate:.1%}.")
     print(f"Book: equity {usd(total)}, {qty:.4f} ETH long, liquidation "
           + (usd(liq) if liq is not None else "none") + f" ({s['status']}).")
     if s["cap_leverage"] is None:
@@ -201,14 +202,16 @@ def _print_plan(ctx: Ctx, price: float) -> None:
 
 def cmd_plan(args, ctx: Ctx) -> int:
     j = ctx.journal
-    if args.floor is not None or args.weekly is not None:
+    if args.floor is not None or args.weekly is not None or args.mmr is not None:
         current = j.plan or {}
         floor = args.floor if args.floor is not None else current.get("floor")
         weekly = args.weekly if args.weekly is not None else current.get("weekly_add")
         if floor is None or weekly is None:
             raise CliError("the first plan needs both --floor and --weekly")
-        j.set_plan(floor, weekly)
+        mmr = args.mmr if args.mmr is not None else current.get("mmr", plan.PLAN_MMR)
+        j.set_plan(floor, weekly, mmr)
         j.save()
+        ctx = replace(ctx, cfg=plan.with_plan_margin(ctx.cfg, j.plan))
     if not j.plan:
         print("No plan set: ethtracker plan --floor 1250 --weekly 500")
         return 0
@@ -1674,6 +1677,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("plan", cmd_plan, "set or show the adding plan: a liquidation floor and a weekly add")
     sp.add_argument("--floor", type=float, help="the highest your liquidation price may go, in dollars")
     sp.add_argument("--weekly", type=float, help="new cash added each week, in dollars")
+    sp.add_argument("--mmr", type=float, help="your venue's maintenance margin as a fraction (a new plan assumes 0.02)")
     sp.add_argument("--price", type=float, help="price to evaluate at (default: live)")
 
     sp = add("add", cmd_add, "record new cash and the ETH it bought, sized to keep liquidation at or below the floor")
@@ -1840,7 +1844,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     home = config.home()
     try:
-        ctx = Ctx(cfg=config.load(home / "config.toml"), journal=Journal(home / "state.json"), home=home)
+        journal = Journal(home / "state.json")
+        ctx = Ctx(cfg=plan.with_plan_margin(config.load(home / "config.toml"), journal.plan), journal=journal, home=home)
         return args.fn(args, ctx)
     except (CliError, DataError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

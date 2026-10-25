@@ -141,13 +141,13 @@ What to trust:
 A long built up every week, whose liquidation price is never allowed above a floor you choose. It replaces the swing rules: no stop other than the floor, no time stop, no stress or risk-per-trade limit, and risk flags are information, not instructions.
 
 ```
-ethtracker plan --floor 1250 --weekly 500      # once
+ethtracker plan --floor 1250 --weekly 500      # once (add --mmr 0.01 if your venue's maintenance margin is 1%)
 ethtracker add --usd 5000 --price <your fill>  # the first buy
 ethtracker add --price <your fill>             # each week: the weekly add, sized to the floor
 ethtracker plan                                # where you stand, at the live price
 ```
 
-The maths is the whole-book liquidation of a cross-margined long: equity + q(p − P) = m·q·p. At price P the account can hold at most equity / (P − floor·(1 − m)) ETH, so new cash can carry at most P / (P − floor·(1 − m)) leverage: 2.14x at $2,336 with a $1,250 floor, more the nearer price is to the floor. Buying more than that lifts the liquidation price above the floor; `add` refuses it. A held position's liquidation price does not rise as price rises, so the book de-levers in a rally and every week's cash buys more ETH lower down.
+The maths is the whole-book liquidation of a cross-margined long: equity + q(p − P) = m·q·p. At price P the account can hold at most equity / (P − floor·(1 − m)) ETH, so new cash can carry at most P / (P − floor·(1 − m)) leverage: 2.10x at $2,336 with a $1,250 floor and m = 2%, more the nearer price is to the floor. Buying more than that lifts the liquidation price above the floor; `add` refuses it. The maintenance margin `m` is stored with the plan and used by both your machine and the daily job. A new plan assumes 2%, which appears to be Deribit's standard margin for its ETH-USDC linear perpetual (the contract behind Coinbase's ETH perp); set yours with `--mmr` once the exchange shows your liquidation price. Assuming too little puts the real liquidation price above the floor, while assuming too much only buys slightly less. A held position's liquidation price does not rise as price rises, so the book de-levers in a rally and every week's cash buys more ETH lower down.
 
 What the dashboard shows under a plan:
 

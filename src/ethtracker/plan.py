@@ -14,7 +14,7 @@ rates of "the pullback is over" signals, so none of them is mistaken for a high-
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,17 @@ LADDER_DEPTHS = (0.05, 0.09, 0.13, 0.20)
 AT_FLOOR = 0.01  # a liquidation price within 1% of the floor counts as at it
 ACTIVE_DAYS = 5
 CROWDED, LIGHT = 0.90, 0.10  # funding percentiles over the last year
+# A new plan's maintenance margin. Coinbase's ETH perp is Deribit's ETH-USDC linear perpetual, whose standard
+# margin appears to be about 2% for maintenance (Deribit's Linear Perpetual help page, read via search summaries
+# only). Assuming too little puts the real liquidation price above the floor; too much only buys slightly less.
+PLAN_MMR = 0.02
+
+
+def with_plan_margin(cfg, plan: dict | None):
+    """The config with the plan's maintenance margin, so the CLI and the daily job size and mark alike."""
+    if plan and plan.get("mmr") is not None:
+        return replace(cfg, maintenance_margin_rate=plan["mmr"])
+    return cfg
 
 
 def _num(x) -> float | None:

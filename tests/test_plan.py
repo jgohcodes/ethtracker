@@ -177,9 +177,22 @@ def test_the_first_plan_needs_a_floor_and_a_weekly_add(capsys):
     code = main(["plan", "--floor", "1250"])
     assert code == 2 and "both --floor and --weekly" in capsys.readouterr().err
     code, out = run(capsys, "plan", "--floor", 1250, "--weekly", 500, "--price", 2336)
-    assert code == 0 and "never above $1,250.00" in out and "2.14x" in out
+    assert code == 0 and "never above $1,250.00" in out and "2.10x" in out  # 2336 / (2336 - 1250 x 0.98)
+    assert "Maintenance margin 2.0%" in out  # a new plan assumes the venue's 2%, not the config's 0.5%
     code, out = run(capsys, "plan", "--weekly", 400, "--price", 2336)  # one field at a time after that
-    assert code == 0 and "add $400.00 a week" in out and "$1,250.00" in out
+    assert code == 0 and "add $400.00 a week" in out and "$1,250.00" in out and "Maintenance margin 2.0%" in out
+    code, out = run(capsys, "plan", "--mmr", 0.005, "--price", 2336)
+    assert code == 0 and "2.14x" in out and "Maintenance margin 0.5%" in out
+    assert Journal(config.home() / "state.json").plan["mmr"] == 0.005
+
+
+def test_the_plans_margin_reaches_the_daily_snapshot(tmp_path):
+    df = synthetic_candles(900, seed=5)
+    price = float(df["close"].iloc[-1])
+    j = plan_journal(tmp_path, price)
+    j.set_plan(price * 0.55, 500.0, mmr=0.02)
+    snap = snapshot.build(CFG, j, df, price, now=NOW, history=df)
+    assert snap["plan"]["cap_leverage"] == pytest.approx(price / (price - price * 0.55 * 0.98))
 
 
 def test_add_needs_a_plan(capsys):
@@ -194,9 +207,9 @@ def test_add_buys_the_most_that_keeps_liquidation_at_or_under_the_floor(capsys):
     j = Journal(config.home() / "state.json")
     (pos,) = j.open_positions()
     assert j.equity == 5000.0 and pos.stop == 1250.0 and pos.note == "plan add"
-    assert 4.55 < pos.qty < 4.58  # 5000 / (2336 - 1250 x 0.995), less the entry fee
+    assert 4.48 < pos.qty < 4.51 and pos.mmr == 0.02  # 5000 / (2336 - 1250 x 0.98), less the entry fee
     status = risk.mark_position(CFG, pos, 2336.0, datetime.now(timezone.utc))
-    liq = risk.account_liquidation_price(j.equity + status.unrealized, [pos], 2336.0, MMR)
+    liq = risk.account_liquidation_price(j.equity + status.unrealized, [pos], 2336.0, 0.02)
     assert liq <= 1250.0 and liq > 1240.0
 
     code, out = run(capsys, "add", "--price", 2200)  # the weekly add, by default

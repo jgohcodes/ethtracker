@@ -70,10 +70,14 @@ class Journal:
         self.equity = (self.equity or 0.0) + amount
         self.peak_equity = (self.peak_equity or 0.0) + amount
 
-    def set_plan(self, floor: float, weekly_add: float) -> None:
+    def set_plan(self, floor: float, weekly_add: float, mmr: float | None = None) -> None:
         if floor <= 0 or weekly_add < 0:
             raise ValueError("the floor must be above zero and the weekly add zero or more")
+        if mmr is not None and not 0 <= mmr < 0.5:
+            raise ValueError("the maintenance margin is a fraction: 0.02 for 2%")
         self.plan = {"floor": float(floor), "weekly_add": float(weekly_add), "set_at": now_iso()}
+        if mmr is not None:
+            self.plan["mmr"] = float(mmr)
 
     def open(self, opened_at: str | None = None, **fields) -> Position:
         pos = Position(id=self.next_id, opened_at=opened_at or now_iso(), **fields)
