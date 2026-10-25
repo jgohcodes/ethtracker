@@ -249,6 +249,8 @@ def test_a_missing_liquidation_price_comes_from_the_buffer_and_the_probe_describ
     lines = "\n".join(coinbase.probe(CrossMarginClient()))
     assert "not read: liquidation from liquidation_price = {rawCurrency: {value: empty text, currency: other text}}" in lines
     assert "not read: leverage from leverage = empty text" in lines
+    assert "dashboard liquidation price: worked out from the portfolio's liquidation buffer" in lines
+    assert "dashboard liquidation price: the exchange's own" in "\n".join(coinbase.probe(FakeClient()))
     for secret in ("4.5321", "2311", "4521", "USDC", UUID):
         assert secret not in lines, secret
 

@@ -193,13 +193,16 @@ def probe(client: Client) -> list[str]:
                              + (f"; fields {', '.join(fields)}" if fields else ""))
                 if eth and name == "positions":
                     parsed = position_from(eth[0])
-                    lines.append(f"    values read: {_read(parsed, skip=('product', 'side'))}")
+                    lines.append(f"    values read: {_read(parsed, skip=('product', 'side', 'liquidation_from'))}")
                     for key, names in POSITION_FIELDS.items():
                         if parsed[key] is None:
                             field = next((n for n in names if n in eth[0]), names[0])
                             lines.append(f"    not read: {key} from {field} = {_describe(eth[0].get(field))}")
             if label[0] == "perpetuals portfolio summary" and isinstance(body, dict):
                 lines.append(f"  values read: {_read(summary_from(body))}")
+    shown = [p.get("liquidation_from") for p in account(client)["positions"]]
+    source = {"exchange": "the exchange's own", "buffer": "worked out from the portfolio's liquidation buffer", None: "none"}
+    lines.append("dashboard liquidation price: " + ("; ".join(source[s] for s in shown) if shown else "no ETH perp position"))
     return lines
 
 
