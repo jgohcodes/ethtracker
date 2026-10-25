@@ -317,14 +317,16 @@ def cmd_entry_study(args, ctx: Ctx) -> int:
             print()
             print(f"Floor {under:.0%} under the entry-day close; from {label}: {rows[0].starts} starts in {rows[0].episodes} "
                   f"pullbacks. Orders good for {pullbacks.BID_DAYS} days, else bought at the close then. A year on, per dollar")
-            print(f"  {'entry':<18} {'filled':>7} {'ETH vs now':>11} {'liquidated':>11} {'median value':>13} {'beat buying now':>16}")
+            print(f"  {'entry':<18} {'filled':>7} {'ETH vs now':>11} {'liquidated':>11}   if not liquidated: {'median value':>12} {'beat now':>9}")
             for r in rows:
                 name = "at the close (now)" if r.depth == 0 else f"order {r.depth:.0%} under"
-                beat = "" if r.depth == 0 else f"{r.beat_now:.0%}"
-                print(f"  {name:<18} {r.filled:>7.0%} {r.eth:>10.2f}x {r.liquidated:>11.0%} {r.value:>12.2f}x {beat:>16}")
+                beat = "" if r.depth == 0 else na(r.beat_now, lambda x: f"{x:.0%}")
+                print(f"  {name:<18} {r.filled:>7.0%} {r.eth:>10.2f}x {r.liquidated:>11.0%}   {'':>18} "
+                      f"{na(r.value, lambda x: f'{x:.2f}x'):>12} {beat:>9}")
     print()
     print("Sized to the floor, a dollar buys 1 / (price - floor x (1 - maintenance margin)) ETH, so a lower fill buys more ETH "
-          "with the same liquidation price. Fees and funding are left out; overlapping starts within one pullback are not independent.")
+          "with the same liquidation price. Any fall to the floor fills the order first, so both entries are liquidated on the "
+          "same paths. Fees and funding are left out; overlapping starts within one pullback are not independent.")
     return 0
 
 

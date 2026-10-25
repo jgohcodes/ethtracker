@@ -289,7 +289,7 @@ def test_reaching_the_floor_wipes_out_either_entry():
     start = np.zeros(400, dtype=bool)
     start[0] = True
     rows = plan.entry_vs_bid(path(closes, lows=lows), 0.5, MMR, placed_on=start)
-    assert all(r.liquidated == 1.0 and r.value == 0.0 for r in rows)
+    assert all(r.liquidated == 1.0 and math.isnan(r.value) for r in rows)  # nothing survives to compare
 
 
 def test_entry_study_command(capsys, tmp_path, monkeypatch):
@@ -302,5 +302,5 @@ def test_entry_study_command(capsys, tmp_path, monkeypatch):
                         lambda start, end, **kw: (pd.Series(0.0001, index=pd.date_range(start, end, freq="D", tz="UTC")), 0))
     code, text = run(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "entry-study")
     assert code == 0
-    for heading in ("Floor 40% under", "Floor 50% under", "at the close (now)", "order 13% under", "beat buying now"):
+    for heading in ("Floor 40% under", "Floor 50% under", "at the close (now)", "order 13% under", "if not liquidated"):
         assert heading in text, heading

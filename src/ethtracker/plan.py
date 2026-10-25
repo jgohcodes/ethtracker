@@ -195,9 +195,9 @@ class Entry:
     episodes: int
     filled: float  # share of orders that filled (the rest buy at the close when the order expires)
     eth: float  # median ETH bought per dollar, against buying at the close
-    liquidated: float  # share whose floor was reached within the horizon
-    value: float  # median account value per dollar at the horizon, 0 if liquidated
-    beat_now: float  # share that ended worth more than buying at the close
+    liquidated: float  # share whose floor was reached within the horizon: the same paths for every entry
+    value: float  # median account value per dollar at the horizon, of those not liquidated
+    beat_now: float  # share that ended worth more than buying at the close, of those not liquidated
 
 
 def entry_vs_bid(full: pd.DataFrame, under: float, mmr: float, depths=LADDER_DEPTHS, days: int = pullbacks.BID_DAYS,
@@ -205,7 +205,8 @@ def entry_vs_bid(full: pd.DataFrame, under: float, mmr: float, depths=LADDER_DEP
     """From each start day: put one dollar to work with the liquidation price held at a floor ``under`` the close,
     either at that close or through an order ``depth`` under it, good for ``days`` (bought at the close if it never
     fills). Sized to the floor, a lower fill buys more ETH for the same dollar and the same liquidation price.
-    Fees and funding are left out: both entries pay about the same."""
+    Any fall to the floor passes through the order first, so both entries are liquidated on the same paths;
+    values and wins are reported for the rest. Fees and funding are left out: both entries pay about the same."""
     close, low, open_ = (full[c].to_numpy(float) for c in ("close", "low", "open"))
     n = len(close)
     mask = pullbacks.in_pullback(full) if placed_on is None else np.asarray(placed_on, dtype=bool)
@@ -222,10 +223,15 @@ def entry_vs_bid(full: pd.DataFrame, under: float, mmr: float, depths=LADDER_DEP
     for i in starts:
         floor = close[i] * (1 - under)
         now[i] = outcome(i, i, close[i], floor)
-    rows = [Entry(0.0, len(starts), episodes, 1.0, 1.0, float(np.mean([v[2] for v in now.values()])) if starts else float("nan"),
-                  float(np.median([v[1] for v in now.values()])) if starts else float("nan"), float("nan"))]
+    alive = [i for i in starts if not now[i][2]]
+
+    def median(values):
+        return float(np.median(values)) if len(values) else float("nan")
+
+    rows = [Entry(0.0, len(starts), episodes, 1.0, 1.0, float(np.mean([now[i][2] for i in starts])) if starts else float("nan"),
+                  median([now[i][1] for i in alive]), float("nan"))]
     for depth in depths:
-        fills, ratios, values, deaths, beats = 0, [], [], [], []
+        fills, ratios, values, deaths, beats = 0, [], {}, [], {}
         for i in starts:
             floor, bid = close[i] * (1 - under), close[i] * (1 - depth)
             hit = np.flatnonzero(low[i + 1:i + days + 1] <= bid)
@@ -237,10 +243,10 @@ def entry_vs_bid(full: pd.DataFrame, under: float, mmr: float, depths=LADDER_DEP
                 j = i + days
                 qty, value, dead = outcome(i, j, close[j], floor)
             ratios.append(qty / now[i][0])
-            values.append(value)
+            values[i] = value
             deaths.append(dead)
-            beats.append(value > now[i][1])
+            beats[i] = value > now[i][1]
         rows.append(Entry(depth, len(starts), episodes, fills / len(starts) if starts else float("nan"),
                           float(np.median(ratios)) if starts else float("nan"), float(np.mean(deaths)) if starts else float("nan"),
-                          float(np.median(values)) if starts else float("nan"), float(np.mean(beats)) if starts else float("nan")))
+                          median([values[i] for i in alive]), float(np.mean([beats[i] for i in alive])) if alive else float("nan")))
     return rows
