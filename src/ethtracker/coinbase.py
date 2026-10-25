@@ -203,35 +203,15 @@ def probe(client: Client) -> list[str]:
     held = account(client)["positions"]
     source = {"exchange": "the exchange's own", "buffer": "worked out from the portfolio's liquidation buffer", None: "none"}
     lines.append("dashboard liquidation price: " + ("; ".join(source[p.get("liquidation_from")] for p in held) if held else "no ETH perp position"))
-    if held:
-        lines.append("open trades rebuilt from fills: " + "; ".join(
-            "all found" if p.get("trades_complete") else "older fills needed (shown as an earlier trade)" for p in held))
-        lines += [f"  {line}" for line in _fills_against(client, held[0])]
-    return lines
-
-
-def _fills_against(client: Client, p: dict) -> list[str]:
-    """How the fills read compare with the position, without amounts: kinds, units, a ratio and an age bucket."""
-    meta: dict = {}
-    fills = eth_fills(client, p["product"], meta)
-    net = sum(f["size"] * (1 if f["side"] == "buy" else -1) for f in fills if f["size"])
-    oldest = min((pd_time(f["time"]) for f in fills if f["time"]), default=None)
-    age = None if oldest is None else (time.time() - oldest) / 86400
-    bucket = "none" if age is None else "under 2 days" if age < 2 else "under 2 weeks" if age < 14 else "under 3 months" if age < 92 else "older"
-    ratio = net / p["size"] if p.get("size") else None
-    return [
-        f"fills: product filter used {'yes' if meta.get('filtered') else 'no'}, every page read {'yes' if meta.get('ended') else 'no'}; "
-        f"position product {p['product']}, fill products {', '.join(sorted({str(f['product']) for f in fills})) or 'none'}",
-        f"fills: kinds {', '.join(sorted({f['type'] or '?' for f in fills})) or 'none'}; sides {', '.join(sorted({f['side'] or '?' for f in fills})) or 'none'}; "
-        f"sized in quote currency {', '.join(sorted({'yes' if f['in_quote'] else 'no' for f in fills})) or 'n/a'}",
-        f"fills: net bought / position size = {'n/a' if ratio is None else f'{ratio:.2g}'}; oldest fill read: {bucket}",
-    ]
-
-
-def pd_time(value: str) -> float:
-    """Seconds since the epoch for an exchange time like 2026-10-25T17:02:11.123Z."""
-    from datetime import datetime
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    for p in held:
+        lines.append(f"open trades for {p['product']}: read from {p.get('trades_source') or 'neither fills nor filled orders'}"
+                     + ("" if p.get("trades_complete") is None else
+                        "; all found" if p["trades_complete"] else "; older trades needed (shown as an earlier trade)"))
+    for path, key, name in ((FILLS, "fills", "fills"), (ORDERS, "orders", "orders")):
+        status, body = client.get(path, {"limit": 50})
+        names = sorted({str(i.get("product_id")) for i in (body or {}).get(key, []) if isinstance(i, dict) and _is_eth_perp(i)}) \
+            if status == 200 and isinstance(body, dict) else []
+        lines.append(f"{name}, unfiltered: HTTP {status}; ETH perpetual products {', '.join(names) or 'none'}")
     return lines
 
 
@@ -379,35 +359,43 @@ def fill_from(item: dict) -> dict:
             "in_quote": str(item.get("size_in_quote")).lower() == "true"}
 
 
-def eth_fills(client: Client, product: str | None, meta: dict | None = None) -> list[dict]:
-    """Up to FILL_PAGES pages of the ETH perpetual's fills, newest first (Coinbase's order). ``meta``, if given,
-    is filled with whether the product filter was used and whether the pages reached the oldest fill."""
-    def pages(params):
-        out, cursor, ended = [], None, False
-        for _ in range(FILL_PAGES):
-            status, body = client.get("/api/v3/brokerage/orders/historical/fills", {**params, **({"cursor": cursor} if cursor else {})})
-            if status != 200 or not isinstance(body, dict):
-                break
-            items = [i for i in body.get("fills", []) if isinstance(i, dict)]
-            out += [fill_from(i) for i in items if _is_eth_perp(i)]
-            cursor = body.get("cursor")
-            if not cursor or not items:
-                ended = True
-                break
-        return out, ended
-    fills, ended = pages({"product_ids": [product], "limit": 100}) if product else ([], False)
-    filtered = bool(fills)
-    if not fills:  # if the filter is not honoured for perps, read everything and keep ETH
-        fills, ended = pages({"limit": 100})
-    if meta is not None:
-        meta.update(filtered=filtered, ended=ended)
-    return fills
+FILLS = "/api/v3/brokerage/orders/historical/fills"
+ORDERS = "/api/v3/brokerage/orders/historical/batch"
 
 
-def fills_for(fills: list[dict], position: dict, eth_positions: int) -> list[dict]:
-    """The fills of one position. Coinbase can name a perpetual differently in its fills and its positions, so
-    with a single ETH perpetual position every ETH perpetual fill is its own; with several, names must match."""
-    return fills if eth_positions == 1 else [f for f in fills if f["product"] == position["product"]]
+def order_fill(item: dict) -> dict:
+    """A filled (or part-filled) order as one fill: its average price, filled size and last fill time."""
+    return {"time": _first(item, "last_fill_time", "created_time"), "product": item.get("product_id"),
+            "order": item.get("order_id"), "side": str(item.get("side", "")).lower(), "size": _num(item.get("filled_size")),
+            "price": _num(item.get("average_filled_price")), "fee": _num(item.get("total_fees")), "type": "ORDER", "in_quote": False}
+
+
+def _paged(client: Client, path: str, key: str, params: dict, convert) -> list[dict]:
+    """Up to FILL_PAGES pages of an endpoint's ETH perpetual rows, newest first (Coinbase's order)."""
+    out, cursor = [], None
+    for _ in range(FILL_PAGES):
+        status, body = client.get(path, {**params, **({"cursor": cursor} if cursor else {})})
+        if status != 200 or not isinstance(body, dict):
+            break
+        items = [i for i in body.get(key, []) if isinstance(i, dict)]
+        out += [convert(i) for i in items if _is_eth_perp(i)]
+        cursor = body.get("cursor")
+        if not cursor or not items or body.get("has_next") is False:
+            break
+    return out
+
+
+def trade_history(client: Client, product: str, portfolio: str | None = None) -> tuple[list[dict], str | None]:
+    """The position's own trades: its fills, or failing those its filled orders, read for its product name, then
+    within its portfolio, then unfiltered. Only rows of the position's own product count: an ETH perpetual on
+    another venue is another market. Returns the rows and where they came from (None if nowhere)."""
+    scopes = [{"product_ids": [product]}] + ([{"retail_portfolio_id": portfolio}] if portfolio else []) + [{}]
+    for path, key, convert, source in ((FILLS, "fills", fill_from, "fills"), (ORDERS, "orders", order_fill, "filled orders")):
+        for scope in scopes:
+            rows = [r for r in _paged(client, path, key, {**scope, "limit": 100}, convert) if r["product"] == product and r["size"]]
+            if rows:
+                return rows, source
+    return [], None
 
 
 def open_trades(fills: list[dict], net_size: float | None) -> dict:
@@ -444,8 +432,9 @@ def open_trades(fills: list[dict], net_size: float | None) -> dict:
     return {"trades": lots, "complete": abs(earlier) <= EPS}
 
 
-def account(client: Client) -> dict:
-    """Your ETH perpetual positions, each with the trades still open in it, and the perpetuals portfolio's collateral."""
+def _eth_positions(client: Client) -> tuple[list[tuple[dict, str | None]], dict, int]:
+    """(ETH perpetual position, its portfolio) pairs, the perpetuals portfolio summary, and how many positions
+    the perpetuals portfolios hold in all."""
     positions, summary, held = [], {}, 0
     for p in _portfolios(client):
         if "INTX" not in str(p.get("type", "")).upper() or not p.get("uuid"):
@@ -454,17 +443,24 @@ def account(client: Client) -> dict:
         if status == 200 and isinstance(body, dict):
             items = [i for i in body.get("positions", []) if isinstance(i, dict)]
             held += len(items)
-            positions += [position_from(i) for i in items]
+            positions += [(position_from(i), p["uuid"]) for i in items]
         status, body = client.get(f"/api/v3/brokerage/intx/portfolio/{p['uuid']}")
         if status == 200 and isinstance(body, dict):
             summary = summary_from(body)
     status, body = client.get("/api/v3/brokerage/cfm/positions")
     if status == 200 and isinstance(body, dict):
-        positions += [position_from(i) for i in body.get("positions", []) if isinstance(i, dict)]
-    eth = [p for p in positions if _is_eth_perp({"product_id": p.get("product")})]
-    for p in eth:
-        rebuilt = open_trades(fills_for(eth_fills(client, p["product"]), p, len(eth)), p["size"])
-        p["trades"], p["trades_complete"] = rebuilt["trades"], rebuilt["complete"]
+        positions += [(position_from(i), None) for i in body.get("positions", []) if isinstance(i, dict)]
+    return [(q, owner) for q, owner in positions if _is_eth_perp({"product_id": q.get("product")})], summary, held
+
+
+def account(client: Client) -> dict:
+    """Your ETH perpetual positions, each with the trades still open in it, and the perpetuals portfolio's collateral."""
+    pairs, summary, held = _eth_positions(client)
+    eth = [q for q, _ in pairs]
+    for q, owner in pairs:
+        rows, source = trade_history(client, q["product"], owner)
+        rebuilt = open_trades(rows, q["size"]) if rows else {"trades": [], "complete": None}
+        q["trades"], q["trades_complete"], q["trades_source"] = rebuilt["trades"], rebuilt["complete"], source
     if held == 1 and len(eth) == 1 and eth[0]["liquidation"] is None and summary:
         eth[0]["liquidation"] = liquidation_from_buffer(eth[0], summary.get("liquidation_buffer"))
         eth[0]["liquidation_from"] = "buffer" if eth[0]["liquidation"] is not None else None

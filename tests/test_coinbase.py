@@ -323,37 +323,62 @@ def test_fills_are_paged_until_the_cursor_runs_out():
                              "cursor": str(page + 1) if page < 2 else ""}
             return super().get(path, params)
     client = Paged()
-    fills = coinbase.eth_fills(client, "ETH-PERP-INTX")
-    assert len(fills) == 3 and client.seen[0]["product_ids"] == ["ETH-PERP-INTX"] and client.seen[-1]["cursor"] == "2"
+    rows, source = coinbase.trade_history(client, "ETH-PERP-INTX")
+    assert source == "fills" and len(rows) == 3
+    assert client.seen[0]["product_ids"] == ["ETH-PERP-INTX"] and client.seen[-1]["cursor"] == "2"
 
 
-def test_the_check_compares_fills_with_the_position_without_amounts():
+def test_the_check_says_where_the_trades_came_from_without_amounts():
     class Partial(FakeClient):  # the fills explain half of the position
         def get(self, path, params=None):
             if path.endswith("/fills"):
                 return 200, {"fills": [{"product_id": "ETH-PERP-INTX", "side": "BUY", "size": "2.26605", "price": "2311.17",
-                                        "trade_time": "2026-10-25T17:02:11Z", "order_id": "o", "trade_type": "FILL", "size_in_quote": False}],
-                             "cursor": ""}
+                                        "trade_time": "2026-10-25T17:02:11Z", "order_id": "o", "trade_type": "FILL"},
+                                       {"product_id": "SOL-PERP-INTX", "side": "BUY", "size": "9", "price": "180"}], "cursor": ""}
             return super().get(path, params)
     lines = "\n".join(coinbase.probe(Partial()))
-    assert "open trades rebuilt from fills: older fills needed" in lines
-    assert "product filter used yes, every page read yes; position product ETH-PERP-INTX, fill products ETH-PERP-INTX" in lines
-    assert "kinds FILL; sides buy; sized in quote currency no" in lines and "net bought / position size = 0.5;" in lines
-    for secret in ("4.5321", "2.266", "2311", UUID):
+    assert "open trades for ETH-PERP-INTX: read from fills; older trades needed" in lines
+    assert "fills, unfiltered: HTTP 200; ETH perpetual products ETH-PERP-INTX" in lines
+    assert "orders, unfiltered: HTTP 404; ETH perpetual products none" in lines
+    for secret in ("4.5321", "2.266", "2311", "SOL", UUID):
         assert secret not in lines, secret
 
 
-def test_fills_named_differently_from_the_position_still_rebuild_its_trades():
-    class Renamed(FakeClient):
-        def get(self, path, params=None):
-            if path.endswith("/fills"):
-                if params.get("product_ids"):
-                    return 200, {"fills": [], "cursor": ""}  # the filter knows the fills by another name
-                return 200, {"fills": [{"product_id": "ETH-PERP", "side": "BUY", "size": "4.5321", "price": "2311.17",
-                                        "trade_time": "2026-10-25T17:02:11Z", "order_id": "o", "trade_type": "FILL"}], "cursor": ""}
-            return super().get(path, params)
-    (p,) = coinbase.account(Renamed())["positions"]
-    assert p["trades_complete"] and p["trades"][0]["price"] == pytest.approx(2311.17)
-    lines = "\n".join(coinbase.probe(Renamed()))
-    assert "open trades rebuilt from fills: all found" in lines and "fill products ETH-PERP\n" in lines
-    assert coinbase.fills_for([{"product": "ETH-PERP"}], {"product": "ETH-PERP-INTX"}, 2) == []
+class OtherVenue(FakeClient):
+    """The position is on Deribit's ETH_USDC-PERPETUAL; the fills endpoint knows only an old, closed ETH-PERP-INTX round trip."""
+    orders = True
+
+    def get(self, path, params=None):
+        if "/intx/positions/" in path:
+            status, body = super().get(path, params)
+            body["positions"][0]["product_id"] = "ETH_USDC-PERPETUAL"
+            return status, body
+        if path.endswith("/fills"):
+            return 200, {"fills": [{"product_id": "ETH-PERP-INTX", "side": "BUY", "size": "1", "price": "3000", "trade_time": "2026-01-02T00:00:00Z"},
+                                   {"product_id": "ETH-PERP-INTX", "side": "SELL", "size": "1", "price": "3100", "trade_time": "2026-01-09T00:00:00Z"}],
+                         "cursor": ""}
+        if path.endswith("/orders/historical/batch"):
+            if not self.orders:
+                return 200, {"orders": [], "has_next": False}
+            return 200, {"orders": [{"product_id": "ETH_USDC-PERPETUAL", "order_id": "x", "side": "BUY", "status": "FILLED",
+                                     "filled_size": "4.5321", "average_filled_price": "2311.17", "total_fees": "5.2",
+                                     "created_time": "2026-10-25T17:02:00Z", "last_fill_time": "2026-10-25T17:02:11Z"}], "has_next": False}
+        return super().get(path, params)
+
+
+def test_another_venues_fills_are_never_the_positions_and_filled_orders_stand_in():
+    (p,) = coinbase.account(OtherVenue())["positions"]
+    assert p["trades_source"] == "filled orders" and p["trades_complete"]
+    (t,) = p["trades"]
+    assert t["time"] == "2026-10-25T17:02:11Z" and t["price"] == pytest.approx(2311.17) and t["size"] == pytest.approx(4.5321)
+    lines = "\n".join(coinbase.probe(OtherVenue()))
+    assert "open trades for ETH_USDC-PERPETUAL: read from filled orders; all found" in lines
+    assert "orders, unfiltered: HTTP 200; ETH perpetual products ETH_USDC-PERPETUAL" in lines
+
+
+def test_with_no_trades_of_its_own_a_position_shows_none_rather_than_another_markets():
+    client = OtherVenue()
+    client.orders = False
+    (p,) = coinbase.account(client)["positions"]
+    assert p["trades"] == [] and p["trades_source"] is None and p["trades_complete"] is None
+    assert "open trades for ETH_USDC-PERPETUAL: read from neither fills nor filled orders" in "\n".join(coinbase.probe(client))

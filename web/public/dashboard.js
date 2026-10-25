@@ -458,7 +458,11 @@ const PART_NAMES = { momentum: "Momentum", trend: "Trend", long_trend: "200-day"
 // stood on the close before it (the same basis as the buy log, so nothing from the trade's own day leaks in).
 function openTrades(p, price) {
   const trades = p.trades ?? [];
-  if (!trades.length) return null;
+  if (!trades.length) {
+    return h("p", { class: "note", text: `Coinbase's API returned neither fills nor filled orders for ${p.product ?? "this market"}, so the ` +
+      "open trades, and the signals at each, cannot be read from the exchange. Record each buy with `ethtracker add --at …` " +
+      "and the buy log keeps the signals for it." });
+  }
   const sign = p.side === "short" ? -1 : 1;
   const rows = trades.map((t) => {
     const then = t.signals;
@@ -484,7 +488,9 @@ function openTrades(p, price) {
     h("h3", { class: "sub", text: trades.length === 1 ? "The open trade" : `The ${trades.length} open trades, oldest first` }),
     h("ul", { class: "trades__list" }, rows),
     p.trades_complete === false ? h("p", { class: "note", text:
-      "The fills read do not reach back to when this position was opened; the first row is the part opened before them." }) : null);
+      "The trades read do not reach back to when this position was opened; the first row is the part opened before them." }) : null,
+    p.trades_source === "filled orders" ? h("p", { class: "note", text:
+      "Read from your filled orders: Coinbase's fills list does not include this market." }) : null);
 }
 
 // ---- the signal score -----------------------------------------------------------------------------
