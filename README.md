@@ -172,7 +172,9 @@ your machine
   ethtracker open/close/equity, then `ethtracker publish --once` ──► snapshot + journal
 ```
 
-Vercel only stores and displays; the maths runs in the job, which never holds an exchange key. Your journal and the open-interest history live in your Redis, never in this (public) repository.
+Vercel only stores and displays; the maths runs in the job. Your journal and the open-interest history live in your Redis, never in this (public) repository.
+
+**Your exchange account (optional).** Give the job a Coinbase key with **View** permission only, and the "On Coinbase" panel shows the exchange's own ETH perp position, liquidation price, collateral and recent ETH fills next to the tool's numbers. Create the key in the Coinbase Developer Platform with **ECDSA** as the signature algorithm (Coinbase's docs say its App API SDKs do not take Ed25519 keys). Paste the whole downloaded `.json` file's text into a GitHub secret named `COINBASE_API_KEY_JSON`. If that secret holds only an Ed25519 key's secret, add its ID as `COINBASE_API_KEY_ID`. To check the key, run the workflow with *studies* `account`. `account-check` prints only shapes: which endpoints answered, which fields came back, and whether an ETH perp position was found. It never prints amounts or ids. A key that can trade or transfer is called out as a warning.
 
 **Set up (about ten minutes)**
 
