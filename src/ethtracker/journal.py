@@ -23,6 +23,7 @@ class Journal:
         self.next_id = 1
         self.positions: list[Position] = []
         self.plan: dict | None = None  # {"floor": USD, "weekly_add": USD}: the adding plan, if one is set
+        self.decisions: list[dict] = []  # per buy: what the signals said when it was made (see decisions.py)
         if path.exists():
             raw = json.loads(path.read_text())
             self.equity = raw["equity"]
@@ -30,6 +31,7 @@ class Journal:
             self.next_id = raw["next_id"]
             self.positions = [Position(**p) for p in raw["positions"]]
             self.plan = raw.get("plan")
+            self.decisions = raw.get("decisions", [])
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -41,6 +43,8 @@ class Journal:
         }
         if self.plan:
             payload["plan"] = self.plan
+        if self.decisions:
+            payload["decisions"] = self.decisions
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2))
         os.replace(tmp, self.path)
@@ -71,11 +75,16 @@ class Journal:
             raise ValueError("the floor must be above zero and the weekly add zero or more")
         self.plan = {"floor": float(floor), "weekly_add": float(weekly_add), "set_at": now_iso()}
 
-    def open(self, **fields) -> Position:
-        pos = Position(id=self.next_id, opened_at=now_iso(), **fields)
+    def open(self, opened_at: str | None = None, **fields) -> Position:
+        pos = Position(id=self.next_id, opened_at=opened_at or now_iso(), **fields)
         self.next_id += 1
         self.positions.append(pos)
         return pos
+
+    def record_decision(self, position_id: int, record: dict) -> None:
+        """Keep one record per position: a later capture (a backfill) replaces an earlier one that failed."""
+        self.decisions = [d for d in self.decisions if d.get("position_id") != position_id]
+        self.decisions.append({"position_id": position_id, **record})
 
     def close(self, position_id: int, exit_price: float, realized_pnl: float) -> Position:
         pos = self.get(position_id)

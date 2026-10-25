@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import pandas as pd
 import requests
 
-from . import advice, cycles, indicators, plan, risk, signals
+from . import advice, cycles, decisions, indicators, plan, risk, signals
 from .config import Config
 from .data import DataError
 from .journal import Journal
@@ -203,6 +203,8 @@ def build(
         "trend": plan.trend(context),
         "crowding": plan.crowding(funding8h),
         "odds": plan.odds(context),
+        "buys": decisions.review(context, journal.decisions, {p.id: p for p in journal.positions}, float(price))
+        if journal.decisions else None,
         "config": {
             "margin_mode": cfg.margin_mode, "max_holding_days": None if floor is not None else cfg.max_holding_days,
             "max_open_risk_pct": cfg.max_open_risk_pct,

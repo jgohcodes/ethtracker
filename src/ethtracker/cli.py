@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, combo, config, cycles, derivs, indicators, plan, pullbacks, risk, shorts, signals, snapshot, study, swing
+from . import advice, alerts, combo, config, cycles, decisions, derivs, indicators, plan, pullbacks, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -221,6 +221,14 @@ def cmd_add(args, ctx: Ctx) -> int:
     j = ctx.journal
     if not j.plan:
         raise CliError("set a plan first: ethtracker plan --floor 1250 --weekly 500")
+    try:
+        at = decisions.timestamp(args.at)
+    except ValueError as exc:
+        raise CliError(f"--at: not a date or time: {args.at!r}") from exc
+    if at > pd.Timestamp(datetime.now(timezone.utc)) + pd.Timedelta(minutes=5):
+        raise CliError("--at is in the future")
+    if args.at and args.price is None:
+        raise CliError("--at needs --price: the price you paid then")
     cash = j.plan["weekly_add"] if args.usd is None else args.usd
     price = args.price if args.price is not None else _provider(args, ctx).spot()
     floor, mmr, fee = j.plan["floor"], ctx.cfg.maintenance_margin_rate, ctx.cfg.taker_fee_rate
@@ -237,12 +245,123 @@ def cmd_add(args, ctx: Ctx) -> int:
                        "(use --force to record it anyway)")
     if cash:
         j.deposit(cash)
-    pos = j.open(side="long", entry=price, qty=buy, leverage=buy * price / cash if cash else price / span,
-                 stop=floor, target=None, mmr=mmr, initial_risk_usd=buy * (price - floor), note=args.note or "plan add")
+    pos = j.open(opened_at=at.to_pydatetime().isoformat(timespec="seconds"), side="long", entry=price, qty=buy,
+                 leverage=buy * price / cash if cash else price / span, stop=floor, target=None, mmr=mmr,
+                 initial_risk_usd=buy * (price - floor), note=args.note or "plan add")
     j.save()
     print(f"Recorded #{pos.id}: {usd(cash)} added, {buy:.4f} ETH bought at {usd(price)} ({usd(buy * price)}).")
+    record = _capture(args, ctx, at, price, floor)
+    j.record_decision(pos.id, {"usd": cash, "qty": buy, **record})
+    j.save()
+    _print_decision(record)
     _print_plan(ctx, price)
     print("Run `ethtracker publish --once` to update the dashboard.")
+    return 0
+
+
+def _funding_until(ctx: Ctx, at: pd.Timestamp) -> pd.Series | None:
+    """About a year of daily funding up to ``at``: the cached year for a buy made now, else fetched for that date."""
+    if pd.Timestamp(datetime.now(timezone.utc)) - at < pd.Timedelta(days=2):
+        return _recent_funding(ctx, derivs.HISTORY_INSTRUMENT)
+    try:
+        series, _ = derivs.fetch_funding_history(at - pd.Timedelta(days=366), at, instrument=derivs.HISTORY_INSTRUMENT)
+    except DataError as exc:
+        print(f"warning: funding history unavailable ({exc})", file=sys.stderr)
+        return None
+    return series
+
+
+def _capture(args, ctx: Ctx, at: pd.Timestamp, price: float, floor: float | None,
+             history: pd.DataFrame | None = None) -> dict:
+    """What the signals said at ``at``; if they cannot be read, why, so `review --backfill` can fill it later."""
+    try:
+        if history is None:
+            history, _ = cycles.ignore_flash_prints(_provider(args, ctx).candles(CONTEXT_DAYS))
+        return decisions.capture(ctx.cfg, history, at, price, _funding_until(ctx, at), floor)
+    except (DataError, ValueError) as exc:
+        print(f"warning: the signals at this buy were not captured ({exc}); run `ethtracker review --backfill` later",
+              file=sys.stderr)
+        return {"at": at.isoformat(), "price": price, "error": str(exc)}
+
+
+STANCE_WORDS = {"with": "WITH the signals", "mixed": "MIXED signals", "against": "AGAINST the signals"}
+
+
+def _print_decision(record: dict) -> None:
+    if "error" in record:
+        return
+    parts = ", ".join(f"{k.replace('_', ' ')} {v:+d}" for k, v in record["parts"].items() if v) or "nothing either way"
+    votes = ", ".join(f"{k} {v:+d}" for k, v in record["votes"].items() if v) or "none"
+    print(f"Signals on the {record['basis_close']} close: {STANCE_WORDS[record['stance']]} (score {record['score']:+d}: {parts}).")
+    print(f"  Trend {record['trend']}; family votes {votes}; risk flags {record['risk_flags']}; crowding "
+          f"{record['crowding'] or 'unknown'}; pullback-over signals in the last 5 days: "
+          f"{', '.join(record['pullback_signals']) or 'none'}.")
+    print(f"  Stored with the buy, timestamped {record['at']}; see `ethtracker review` and the dashboard.")
+
+
+def _pct(x) -> str:
+    return "n/a" if x is None else f"{x:+.1%}"
+
+
+def cmd_review(args, ctx: Ctx) -> int:
+    """Your buys against what the signals said when you made them, and how each turned out."""
+    j = ctx.journal
+    provider = _provider(args, ctx)
+    history, _ = cycles.ignore_flash_prints(provider.candles(CONTEXT_DAYS))
+    if args.backfill:
+        have = {d["position_id"] for d in j.decisions if "error" not in d}
+        todo = [p for p in j.positions if p.side == "long" and p.id not in have]
+        for p in todo:
+            old = next((d for d in j.decisions if d.get("position_id") == p.id), {})
+            record = _capture(args, ctx, decisions.timestamp(p.opened_at), p.entry, j.plan["floor"] if j.plan else None, history)
+            j.record_decision(p.id, {"usd": old.get("usd"), "qty": p.qty, **record})
+        j.save()
+        print(f"Captured the signals for {len(todo)} buy(s) without a record, from the close before each buy.")
+    try:
+        price = provider.spot()
+    except DataError:
+        price = None
+    block = decisions.review(snapshot.closed_candles(history, datetime.now(timezone.utc)), j.decisions,
+                             {p.id: p for p in j.positions}, price)
+    if block is None:
+        print("No buys with captured signals yet: `ethtracker add` records them" +
+              (f" ({sum(1 for d in j.decisions if 'error' in d)} failed: run `ethtracker review --backfill`)" if j.decisions else ""))
+        return 0
+    print(f"Your buys against the signals: judged on {decisions.JUDGE_DAYS} days (on {decisions.EARLY_DAYS} while newer); "
+          "signals as they read on the close before each buy")
+    print(f"  {'#':>3} {'date':<10} {'price':>10} {'ETH':>8} {'signals':<8} {'score':>5} {'30d':>7} {'90d':>7} {'now':>7} "
+          f"{'low 30d':>8} {'you':>5} {'signals':>8}")
+    verdict = {True: "right", False: "wrong", None: "-"}
+    for r in block["rows"]:
+        o = r["outcome"]
+        print(f"  {r['position_id']:>3} {r['at'][:10]:<10} {r['price']:>10,.2f} {r.get('qty') or 0:>8.4f} {r['stance']:<8} "
+              f"{r['score']:>+5d} {_pct(o['returns'][30]):>7} {_pct(o['returns'][90]):>7} {_pct(o['now']):>7} "
+              f"{_pct(o['low_30']):>8} {verdict[o['right']]:>5} {verdict[o['signals_right']]:>8}")
+    s = block["summary"]
+    print()
+    for stance in ("with", "mixed", "against"):
+        g = s["by_stance"][stance]
+        if g["buys"]:
+            print(f"  {STANCE_WORDS[stance]}: {g['buys']} buy(s); judged {g['judged']}"
+                  + (f", right {g['right']:.0%}, median {g['median_return']:+.1%}" if g["judged"] else ""))
+    if s["against_judged"]:
+        print(f"  You went against the signals and were right {s['against_and_right']} of {s['against_judged']} time(s).")
+    missed = [(r, m) for r in block["rows"] for m in r["outcome"]["misses"]]
+    unflagged = [(r, u) for r in block["rows"] for u in r["outcome"]["unflagged"]]
+    if missed or unflagged:
+        print()
+        print("What the signals got wrong, 30 days after each buy:")
+        for r, u in unflagged:
+            print(f"  #{r['position_id']} {r['at'][:10]}: {u}")
+        for r, m in missed:
+            print(f"  #{r['position_id']} {r['at'][:10]}: {m['headline']} (price then went {_pct(r['outcome']['returns'][30])})")
+    if s["signal_hits"]:
+        print()
+        print("Each signal on your buys: how often its direction matched the next 30 days")
+        for h in s["signal_hits"]:
+            print(f"  {h['name']:<20} {h['calls']:>4} call(s)  right {h['right']:.0%}")
+    if block["missing"]:
+        print(f"\n{block['missing']} buy(s) have no captured signals: run `ethtracker review --backfill`.")
     return 0
 
 
@@ -1562,7 +1681,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--price", type=float, help="your fill price (default: live)")
     sp.add_argument("--qty", type=float, help="ETH actually bought (default: the most the floor allows)")
     sp.add_argument("--force", action="store_true", help="record a size beyond the floor anyway")
-    sp.add_argument("--note")
+    sp.add_argument("--at", help="when you bought, if not now: 2026-10-25 or 2026-10-25T14:30 (UTC unless it has an offset)")
+    sp.add_argument("--note", help="why you bought: kept with the buy and the signals at the time")
+
+    sp = add("review", cmd_review, "your buys against what the signals said when you made them, and how each turned out")
+    sp.add_argument("--backfill", action="store_true", help="capture the signals for buys recorded without them")
 
     sp = add("context", cmd_context, "the dashboard's market panels: trend, crowding, signal odds, order fill rates, floor risk")
     sp.add_argument("--floor", type=float, help="also show the risk of reaching this price (keep it out of public logs)")
