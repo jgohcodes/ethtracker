@@ -382,3 +382,27 @@ def test_with_no_trades_of_its_own_a_position_shows_none_rather_than_another_mar
     (p,) = coinbase.account(client)["positions"]
     assert p["trades"] == [] and p["trades_source"] is None and p["trades_complete"] is None
     assert "open trades for ETH_USDC-PERPETUAL: read from neither fills nor filled orders" in "\n".join(coinbase.probe(client))
+
+
+def test_the_check_lists_the_app_wallets_transaction_types_and_fields_but_never_amounts_or_other_wallets():
+    import time as _time
+    now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+
+    class App(FakeClient):
+        def get(self, path, params=None):
+            if path == "/v2/accounts":
+                return 200, {"data": [{"id": "acc-usdc", "currency": {"code": "USDC"}, "type": "wallet"},
+                                      {"id": "acc-sol", "currency": {"code": "SOL"}, "type": "wallet"}]}
+            if path == "/v2/accounts/acc-usdc/transactions":
+                return 200, {"data": [{"id": "t1", "type": "perpetuals_trade", "created_at": now,
+                                       "amount": {"amount": "-2311.17", "currency": "USDC"},
+                                       "details": {"title": "Bought 4.5321 ETH Perp", "subtitle": "x"}},
+                                      {"id": "t0", "type": "send", "created_at": "2025-01-01T00:00:00Z", "amount": {"amount": "5"}}]}
+            if path.startswith("/v2/accounts/acc-sol"):
+                raise AssertionError("other wallets are never read")
+            return super().get(path, params)
+    lines = "\n".join(coinbase.probe(App()))
+    assert "USDC wallet (wallet): transactions HTTP 200; types perpetuals_trade, send; in the last 2 days: perpetuals_trade" in lines
+    assert "perpetuals_trade: fields amount, created_at, details, id, type; details subtitle, title" in lines
+    for secret in ("4.5321", "2311", "acc-usdc", "SOL", "Bought"):
+        assert secret not in lines, secret

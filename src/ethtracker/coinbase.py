@@ -212,7 +212,46 @@ def probe(client: Client) -> list[str]:
         names = sorted({str(i.get("product_id")) for i in (body or {}).get(key, []) if isinstance(i, dict) and _is_eth_perp(i)}) \
             if status == 200 and isinstance(body, dict) else []
         lines.append(f"{name}, unfiltered: HTTP {status}; ETH perpetual products {', '.join(names) or 'none'}")
+    return lines + _app_transactions(client)
+
+
+APP_CURRENCIES = ("USDC", "USD", "ETH", "GBP", "EUR")  # the wallets a perp trade could touch; others are never named
+
+
+def _app_transactions(client: Client) -> list[str]:
+    """Coinbase's older app API (v2): each wallet's transactions. Types and field names only, for the wallets in
+    APP_CURRENCIES: whether a perpetual trade is recorded there at all, and in what shape."""
+    status, body = client.get("/v2/accounts", {"limit": 100})
+    if status != 200 or not isinstance(body, dict):
+        return [f"app transactions (v2): accounts HTTP {status}"]
+    lines = ["app transactions (v2): accounts HTTP 200"]
+    recent = time.time() - 2 * 86400
+    for a in body.get("data") or []:
+        if not isinstance(a, dict) or not a.get("id"):
+            continue
+        cur = a.get("currency")
+        code = str(cur.get("code") if isinstance(cur, dict) else cur or "")
+        if code not in APP_CURRENCIES:
+            continue
+        status, tx = client.get(f"/v2/accounts/{a['id']}/transactions", {"limit": 100})
+        rows = [t for t in (tx or {}).get("data") or [] if isinstance(t, dict)] if status == 200 and isinstance(tx, dict) else []
+        kinds = sorted({str(t.get("type")) for t in rows})
+        new = [t for t in rows if t.get("created_at") and _epoch(t["created_at"]) >= recent]
+        lines.append(f"  {code} wallet ({a.get('type') or '?'}): transactions HTTP {status}; types {', '.join(kinds) or 'none'}; "
+                     f"in the last 2 days: {', '.join(sorted({str(t.get('type')) for t in new})) or 'none'}")
+        for kind in sorted({str(t.get("type")) for t in new}):
+            sample = next(t for t in new if str(t.get("type")) == kind)
+            details = sample.get("details") if isinstance(sample.get("details"), dict) else {}
+            lines.append(f"    {kind}: fields {', '.join(sorted(sample))}; details {', '.join(sorted(details)) or 'none'}")
     return lines
+
+
+def _epoch(value: str) -> float:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _describe(v, depth: int = 0) -> str:
