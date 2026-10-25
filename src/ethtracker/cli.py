@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import advice, alerts, combo, config, cycles, decisions, derivs, indicators, plan, pullbacks, risk, shorts, signals, snapshot, study, swing
+from . import advice, alerts, combo, config, cycles, decisions, derivs, indicators, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -420,6 +420,87 @@ def cmd_context(args, ctx: Ctx) -> int:
     for depth, rung in sorted(plan.ladder_stats(full).items()):
         print(f"  {depth:>6.0%} {na(rung.filled, lambda x: f'{x:.0%}'):>7} {na(rung.held, lambda x: f'{x:.0%}'):>9} "
               f"{na(rung.higher_365, lambda x: f'{x:.0%}'):>6}")
+    return 0
+
+
+def _candidate_states(cfg, full: pd.DataFrame) -> pd.DataFrame:
+    """Signals left out of the score, as daily states by the dashboard's own rules, to show why they are out."""
+    tech = signals.technical_series(cfg, full)
+    rsi = np.where(tech["rsi"] >= cfg.rsi_overbought, -1.0, np.where(tech["rsi"] <= cfg.rsi_oversold, 1.0, 0.0))
+    ext = np.where(tech["z20"] >= cfg.extension_z, -1.0, np.where(tech["z20"] <= -cfg.extension_z, 1.0, 0.0))
+    return pd.DataFrame({"rsi (not scored)": np.where(tech["rsi"].isna(), np.nan, rsi),
+                         "extension (not scored)": np.where(tech["z20"].isna(), np.nan, ext)}, index=full.index)
+
+
+SCORE_ERAS = (("all", None, None), ("to 2020", None, "2021-01-01"), ("2021 on", "2021-01-01", None))
+
+
+def cmd_score_study(args, ctx: Ctx) -> int:
+    asset, full, cfg, funding8h = _asset_history(args, ctx, "the signal score: does each part point the right way, "
+                                                            "and what followed each score?")
+    st = score.states(cfg, full, funding8h)
+    fwd = score.forward(full, args.horizon)
+    every = pd.concat([st, _candidate_states(cfg, full)], axis=1)
+
+    def era(mask_index, start, end):
+        keep = pd.Series(True, index=mask_index)
+        if start:
+            keep &= mask_index >= pd.Timestamp(start, tz="UTC")
+        if end:
+            keep &= mask_index < pd.Timestamp(end, tz="UTC")
+        return keep
+
+    print()
+    print(f"Each part against ETH's next {args.horizon} days. IC: rank correlation of the state with the forward return "
+          "(positive = points the right way). Overlapping windows: about one independent reading a month.")
+    print(f"  {'part':<26} {'weight':>6} " + " ".join(f"{name:>22}" for name, *_ in SCORE_ERAS))
+    print(f"  {'':<26} {'':>6} " + " ".join(f"{'IC  up-when+  up-when-':>22}" for _ in SCORE_ERAS))
+    for col in every.columns:
+        cells = []
+        for _, start, end in SCORE_ERAS:
+            m = era(full.index, start, end) & every[col].notna() & fwd["ret"].notna()
+            x, y = every.loc[m, col], fwd.loc[m, "ret"]
+            ic = score.rank_ic(x, y)
+            up_pos = (y[x > 0] > 0).mean() if (x > 0).any() else float("nan")
+            up_neg = (y[x < 0] > 0).mean() if (x < 0).any() else float("nan")
+            cells.append(f"{ic:+.2f}  {up_pos:>6.0%}  {up_neg:>7.0%}" if np.isfinite(ic) else f"{'n/a':>22}")
+        print(f"  {col:<26} {score.WEIGHTS.get(col, 0):>6.3f} " + " ".join(f"{c:>22}" for c in cells))
+
+    noise = score.chance_ic(cfg, full, horizon=args.horizon)
+    print(f"  Chance alone: with ETH's own days shuffled, the score's IC spreads about +/-{noise:.2f} (one sd), so an IC "
+          f"beyond about +/-{2 * noise:.2f} is unlikely to be luck.")
+
+    variants = {
+        "literature weights (the score)": score.WEIGHTS,
+        "equal weights, all five": {k: 1.0 for k in score.WEIGHTS},
+        "trend only (three parts)": {"momentum": 1.0, "trend": 1.0, "long_trend": 1.0},
+    }
+    print()
+    print("Whole scores against the next {} days: IC by era".format(args.horizon))
+    for name, w in variants.items():
+        sc = score.combine(st, w)
+        ics = []
+        for _, start, end in SCORE_ERAS:
+            m = era(full.index, start, end) & sc.notna() & fwd["ret"].notna()
+            ics.append(score.rank_ic(sc[m], fwd.loc[m, "ret"]))
+        print(f"  {name:<34} " + "  ".join(f"{e}: {ic:+.2f}" for (e, *_), ic in zip(SCORE_ERAS, ics)))
+
+    sc = score.combine(st)
+    print()
+    print(f"What followed each score bucket (the score as weighted), {args.horizon} days on")
+    print(f"  {'bucket':<20} {'era':<8} {'days':>5} {'episodes':>9} {'higher':>7} {'median':>8} {'fell 10%':>9}")
+    for lo, hi, name in score.BUCKETS:
+        for e, start, end in SCORE_ERAS:
+            m = era(full.index, start, end) & sc.notna() & fwd["ret"].notna() & (sc > lo) & (sc <= hi)
+            if not m.any():
+                continue
+            r = fwd.loc[m, "ret"]
+            print(f"  {name:<20} {e:<8} {int(m.sum()):>5} {signals.count_episodes(m):>9} {(r > 0).mean():>7.0%} "
+                  f"{r.median():>+8.1%} {fwd.loc[m, 'fell'].astype(bool).mean():>9.0%}")
+    today = sc.iloc[-1]
+    print()
+    print(f"Today: score {today:+.2f} ({score.label(today)}). Parts: "
+          + ", ".join(f"{k} {int(v):+d}" for k, v in st.iloc[-1].items() if pd.notna(v)))
     return 0
 
 
@@ -1768,6 +1849,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
     sp.add_argument("--floor", type=float, help="your liquidation floor, in dollars")
+
+    sp = add("score-study", cmd_score_study, "check the signal score's parts and buckets against what followed, by era")
+    sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
+    sp.add_argument("--horizon", type=int, default=score.HORIZON, help="days ahead to judge each reading on")
 
     sp = add("entry-study", cmd_entry_study, "put cash to work now or bid lower, when each buy is sized to a liquidation floor")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")

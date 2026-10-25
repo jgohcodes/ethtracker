@@ -19,7 +19,7 @@ on:
         type: boolean
         default: false
       studies:
-        description: "Which studies: all, or a list from signals, backtest, cycle, combo, short, swing, trim, pullbacks, timing, entry"
+        description: "Which studies: all, or a list from signals, backtest, cycle, combo, short, swing, trim, pullbacks, timing, entry, score"
         type: string
         default: all
 
@@ -109,6 +109,10 @@ jobs:
       - name: Pullback study, BTC
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'pullbacks')) }}
         run: ethtracker pullback-study --asset BTC --days 4000
+      # The signal score: each part's direction and each score bucket against what followed, before and from 2021.
+      - name: Score study, ETH
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'score')) }}
+        run: ethtracker score-study --asset ETH --days 4000
       # Putting cash to work now or bidding lower, when each buy is sized to a liquidation floor.
       - name: Entry study, ETH
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'entry')) }}
