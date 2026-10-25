@@ -89,3 +89,20 @@ def test_load_csv_rejects_files_with_no_usable_columns(tmp_path):
         derivs.load_csv(path)
     with pytest.raises(data.DataError, match="cannot read"):
         derivs.load_csv(tmp_path / "missing.csv")
+
+
+def test_compacting_keeps_the_last_three_days_hourly_and_one_row_a_day_before():
+    from datetime import datetime, timezone
+    import pandas as pd
+    times = pd.date_range("2026-10-01T00:17:00Z", "2026-10-25T23:17:00Z", freq="h")
+    text = "time,open_interest\n" + "".join(f"{t.isoformat()},{i}\n" for i, t in enumerate(times))
+    out = derivs.compact(text, now=datetime(2026, 10, 26, 0, 0, tzinfo=timezone.utc)).splitlines()
+    assert out[0] == "time,open_interest"
+    kept = [pd.Timestamp(line.split(",")[0]) for line in out[1:]]
+    cutoff = pd.Timestamp("2026-10-23T00:00:00Z")
+    old = [t for t in kept if t < cutoff]
+    assert len(old) == 22 and all(t.hour == 23 for t in old)  # 1 to 22 Oct: each day's last row
+    assert [t for t in kept if t >= cutoff] == [t for t in times if t >= cutoff]
+    assert kept == sorted(kept)
+    assert derivs.compact(out and "\n".join(out) + "\n", now=datetime(2026, 10, 26, tzinfo=timezone.utc)) == "\n".join(out) + "\n"
+    assert derivs.compact("time,open_interest\n") == "time,open_interest\n"

@@ -1,7 +1,9 @@
-name: Daily dashboard
+name: Dashboard
 
-# Refreshes the Vercel dashboard once a day, just after the 00:00 UTC daily candle closes, from live
-# Coinbase daily candles and Deribit open interest and funding. Run it by hand from the Actions tab too.
+# Refreshes the Vercel dashboard every hour at :17, from live Coinbase daily candles (signals use completed
+# daily candles only, so they change once a day, after the 00:00 UTC close), Deribit open interest and
+# funding, and your Coinbase position: hourly runs date each trade worked out from the position to within the
+# hour. GitHub may start scheduled runs late or drop one under load. Run it by hand from the Actions tab too.
 #
 # Needs two repository secrets: ETHTRACKER_DASHBOARD_URL and ETHTRACKER_INGEST_TOKEN. Without them it
 # does a dry run: live data, computed, nothing published.
@@ -11,7 +13,7 @@ name: Daily dashboard
 
 on:
   schedule:
-    - cron: "17 0 * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       study:

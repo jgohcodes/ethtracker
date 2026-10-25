@@ -160,10 +160,10 @@ Funding paid and fees are not deducted from the journal's equity; they lift the 
 
 ## Dashboard
 
-A private page on Vercel with your positions (each with its action, bull case and bear case), account and stress tiles, the signals, a price ladder and a TradingView daily chart. It runs on real data, refreshed once a day just after the 00:00 UTC daily close, which matches a 1D strategy: signals are computed on **completed daily candles only**, so an unfinished day never repaints them. Positions are marked at the spot price when the job runs.
+A private page on Vercel with your positions (each with its action, bull case and bear case), account and stress tiles, the signals, a price ladder and a TradingView daily chart. It runs on real data, refreshed every hour; signals are computed on **completed daily candles only**, so they change once a day after the 00:00 UTC close and an unfinished day never repaints them. The hourly runs keep positions marked and date each exchange trade to within the hour. Positions are marked at the spot price when the job runs.
 
 ```
-GitHub Actions, daily at 00:17 UTC            Vercel (web/)                        your browser
+GitHub Actions, hourly at :17                 Vercel (web/)                        your browser
   ethtracker cloud-run                          api/ingest  ──► Upstash Redis ◄──  api/snapshot ◄── page + TradingView
    ├ pulls your journal + OI history  ◄──────── api/state   ◄─┘   (snapshot, journal,     (DASHBOARD_TOKEN)
    ├ Coinbase daily candles, Deribit OI/funding                      OI/funding history)
@@ -182,7 +182,7 @@ Vercel only stores and displays; the maths runs in the job. Your journal and the
 2. **Storage:** in the project, Storage (Marketplace), add **Upstash Redis** and connect it. It sets either `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` or `KV_REST_API_URL` / `KV_REST_API_TOKEN`; the API accepts either.
 3. **Tokens:** add two environment variables with different random values (`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`): `DASHBOARD_TOKEN` (the browser reads with it) and `INGEST_TOKEN` (the job and your machine write with it). Redeploy so they take effect.
 4. **GitHub:** repository Settings, Secrets and variables, Actions: add `ETHTRACKER_DASHBOARD_URL` (your `https://….vercel.app` address) and `ETHTRACKER_INGEST_TOKEN` (the same `INGEST_TOKEN`).
-5. **First run:** Actions tab, "Daily dashboard", Run workflow. After that it runs every day at 00:17 UTC (GitHub may start scheduled jobs late, and pauses schedules in public repositories after 60 days without commits).
+5. **First run:** Actions tab, "Dashboard", Run workflow. After that it runs every hour at :17 (GitHub may start scheduled jobs late or drop one under load, and pauses schedules in public repositories after 60 days without commits).
 6. **Your positions:** on your machine, record trades as usual (`ethtracker equity`, `open`, `close`), then run
 
    ```
@@ -197,7 +197,7 @@ Without the GitHub secrets the job still runs as a **dry run**: live data, compu
 
 **Code changes versus data.** The daily numbers reach the page through the API, so nothing is redeployed for them. Vercel redeploys only when the code changes. On the Hobby plan a commit whose author is not the Vercel account owner (commits made by an assistant included) can wait for your approval in Vercel before it deploys, and in a private repository it is refused; redeploy from the Vercel dashboard if that happens.
 
-**Freshness.** The page judges age against the cadence the snapshot declares: a daily snapshot is "Updated" for 30 hours, "Late" after that and "Stale" after 54, with a banner saying where to look. The time is the server's receive time, which a client cannot forge.
+**Freshness.** The page judges age against the cadence the snapshot declares: the hourly job's snapshot is "Updated" for 75 minutes, "Late" after that (a run GitHub started late or dropped) and "Stale" after 2 hours 15 minutes, with a banner saying where to look. The time is the server's receive time, which a client cannot forge.
 
 **Derivatives history.** Deribit's public API gives only today's open interest and funding, so each daily run appends one row to the history kept in Redis: funding signals work from the first run, the 24h open-interest change from the second, and the open-interest percentile after 30 days. There is no free liquidation feed, so liquidation signals stay absent unless you supply one with `--derivs-csv` on your machine.
 

@@ -97,7 +97,7 @@ function updateFreshness() {
   chip.dataset.tone = style[0];
   chip.hidden = false;
   const fix = snap.publisher === "github-actions"
-    ? "Check the \u201cDaily dashboard\u201d workflow in your repository's Actions tab."
+    ? "Check the \u201cDashboard\u201d workflow in your repository's Actions tab."
     : "Check that `ethtracker publish` is running.";
   if (level === "stale") {
     setBanner("critical", "Stale", `The last update was ${humanAge(age)} and updates are expected ${describeInterval(interval)}, so positions and advice may be out of date. ${fix}`, "freshness");
@@ -507,7 +507,7 @@ function openTrades(p, price, s, numbered) {
       h("td", { class: "num" }, h("span", { class: "trade-no", text: String(n) })),
       h("td", { class: "trade__when", text: tradeWhen(t),
         title: t.first_seen ? "Already held when tracking began: its real start may be earlier"
-          : t.seen_at && t.after ? "Made between these two daily runs" : "" }),
+          : t.seen_at && t.after ? "Made between these two runs of the job" : "" }),
       h("td", { class: "num", text: fixed(Math.abs(t.size), 4) }),
       h("td", { class: "num", text: finite(t.price) ? usd(t.price) : "n/a" }),
       h("td", { class: "num" }, since === null ? "n/a" : delta(since, signedPct(since))),
@@ -540,7 +540,7 @@ function openTrades(p, price, s, numbered) {
       "Read from your filled orders: Coinbase's fills list does not include this market." }) : null,
     p.trades_source === "observed" ? h("p", { class: "note", text:
       `Coinbase's API gives no trade history for ${p.product ?? "this market"}, so each trade here is worked out from your ` +
-      "position between the daily runs: dated by the two runs it fell between and priced from the change in Coinbase's " +
+      "position between the job's hourly runs: dated by the two runs it fell between and priced from the change in Coinbase's " +
       "average entry. Its signals are those of the close before the earlier run. A position already held when this " +
       "tracking began counts as one trade, with the signals of the close before that first run." }) : null);
 }

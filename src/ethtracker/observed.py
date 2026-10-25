@@ -2,13 +2,13 @@
 does not give: the Coinbase app's ETH perp is Deribit's ETH_USDC-PERPETUAL, and Coinbase's fills and orders
 endpoints return nothing for it.
 
-Each daily run stores the position it saw (size and average entry). When the next run sees more, the
+Each run of the job (hourly) stores the position it saw (size and average entry). When the next run sees more, the
 difference is a trade: its size is the change and its price follows from the average entry, since
 entry_after * size_after = entry_before * size_before + price * added. When it sees less, the oldest trades
 close first. A trade is known to fall between the two runs: ``after`` (the earlier run) and ``seen_at``.
-Its signals are read from the close before ``after``'s day, which is the close a trade made in that window
-would have seen when the runs are a day apart. A position already held at the first run is one trade,
-``first_seen``, whose real start is unknown.
+Its signals are read from the close before ``after``'s day: the close a trade in that window saw, except when
+the window spans 00:00 UTC (then it is the day before's, never a later one). A position already held at the
+first run is one trade, ``first_seen``, whose real start is unknown.
 
 The stored document holds sizes and prices, so it lives only in the dashboard's private state, never in a
 log or this repository.

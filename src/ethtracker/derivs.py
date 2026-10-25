@@ -89,6 +89,32 @@ def recorded_path(directory: Path, instrument: str) -> Path:
     return directory / f"deribit-{instrument}.csv"
 
 
+RECENT_HOURS = 72  # kept at full resolution: the 24-hour open-interest change needs rows a day apart
+
+
+def compact(text: str, now: datetime | None = None, recent_hours: int = RECENT_HOURS) -> str:
+    """The recorded history with every row of the last ``recent_hours`` and only the last row of each UTC day
+    before that, so hourly runs keep years of daily history within the stored size."""
+    lines = text.strip().splitlines()
+    if len(lines) < 2:
+        return text
+    cutoff = pd.Timestamp(now or datetime.now(timezone.utc)) - pd.Timedelta(hours=recent_hours)
+    rows = []
+    for line in lines[1:]:
+        try:
+            t = pd.Timestamp(line.split(",", 1)[0])
+            t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+        except ValueError:
+            t = None
+        rows.append((t, line))
+    last_of_day = {}
+    for i, (t, _) in enumerate(rows):
+        if t is not None and t < cutoff:
+            last_of_day[t.date()] = i
+    keep = [line for i, (t, line) in enumerate(rows) if t is None or t >= cutoff or last_of_day.get(t.date()) == i]
+    return "\n".join([lines[0], *keep]) + "\n"
+
+
 def append_snapshot(path: Path, row: dict) -> bool:
     """Append one snapshot; False when a row with the same timestamp is already the last one."""
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -370,7 +370,7 @@ def test_publish_once_posts_the_snapshot_pushes_the_journal_and_never_echoes_the
     assert "s3cret-ingest-token" not in captured.out + captured.err
     (snap,) = dash.snapshots
     assert snap["positions"][0]["id"] == 1 and snap["basis"] == "close"
-    assert snap["publisher"] == "local" and snap["refresh_seconds"] == 86_400  # after --once the daily job is the cadence
+    assert snap["publisher"] == "local" and snap["refresh_seconds"] == 3600  # after --once the hourly job is the cadence
     assert ("POST", "http://localhost:3000/api/ingest") in dash.calls
     journal = json.loads(dash.state["journal"])
     assert journal == json.loads((config.home() / "state.json").read_text())
@@ -463,7 +463,7 @@ def test_cloud_run_publishes_from_the_stored_journal_and_grows_the_derivatives_h
     assert code == 0, captured.err
     (snap,) = dash.snapshots
     assert len(snap["positions"]) == 1 and snap["equity"]["wallet"] == 123_456.0
-    assert snap["basis"] == "close" and snap["refresh_seconds"] == 86_400 and snap["publisher"] == "cloud-run"
+    assert snap["basis"] == "close" and snap["refresh_seconds"] == 3600 and snap["publisher"] == "cloud-run"
     assert any(s["name"] == "funding" and "0.060%" in s["headline"] for s in snap["signals"])
     rows = dash.state["derivs"].strip().splitlines()
     assert len(rows) == 3 and rows[0].startswith("time,")  # header, yesterday's row, today's row

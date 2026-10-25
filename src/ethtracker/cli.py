@@ -832,7 +832,8 @@ def _record_derivs(ctx: Ctx) -> None:
         print(f"warning: could not record derivatives data ({exc})", file=sys.stderr)
 
 
-DERIVS_HISTORY_ROWS = 2000  # one row a day from the daily job: years of history, bounded
+DERIVS_HISTORY_ROWS = 2100  # after compaction: a row a day for years, plus the last 72 hours hourly
+JOB_SECONDS = 3600  # the scheduled job runs hourly; the page warns when an update is overdue
 
 
 CONTEXT_DAYS = 4000  # the trend, the signals' odds and the floor risk are measured over ETH's whole history
@@ -957,7 +958,7 @@ def cmd_publish(args, ctx: Ctx) -> int:
     base, token = _dashboard_credentials(args)
     endpoint = snapshot.ingest_endpoint(base)
     provider = _provider(args, ctx)
-    refresh = snapshot.DAY_SECONDS if args.once else int(args.interval)  # after --once, the daily job is the cadence
+    refresh = JOB_SECONDS if args.once else int(args.interval)  # after --once, the scheduled job is the cadence
     df, context, candles_at, first = None, {}, float("-inf"), True
     try:
         while True:
@@ -1020,7 +1021,7 @@ def cmd_cloud_run(args, ctx: Ctx) -> int:
         context = _market_context(ctx, provider)
         trades_doc = _observe(base, token, context["account"]) if base and context.get("account") else None
         snap = snapshot.build(ctx.cfg, journal, df, price, derivs_df, source=provider.name, basis="close",
-                              refresh_seconds=snapshot.DAY_SECONDS, publisher=publisher, **context)
+                              refresh_seconds=JOB_SECONDS, publisher=publisher, **context)
         print(snapshot.public_summary(snap))
         if not args.dry_run:
             print("journal: " + ("pulled from the dashboard" if journal_text is not None
@@ -1033,12 +1034,12 @@ def cmd_cloud_run(args, ctx: Ctx) -> int:
             return 0
         snapshot.publish(snapshot.ingest_endpoint(base), token, snap)
         if recorded:
-            snapshot.put_state(base, token, "derivs", snapshot.tail_csv(history_path.read_text(), DERIVS_HISTORY_ROWS))
+            snapshot.put_state(base, token, "derivs", snapshot.tail_csv(derivs.compact(history_path.read_text()), DERIVS_HISTORY_ROWS))
         print("published the snapshot" + (" and the derivatives history" if recorded else ""))
         if trades_doc is not None:
             try:
                 snapshot.put_state(base, token, "trades", trades_doc)
-                print("stored the exchange position for tomorrow's trade detection")
+                print("stored the exchange position for the next run's trade detection")
             except DataError as exc:  # a dashboard deployed before the "trades" state existed refuses it
                 print(f"warning: exchange position not stored ({exc.__class__.__name__}); redeploy the dashboard", file=sys.stderr)
     return 0
