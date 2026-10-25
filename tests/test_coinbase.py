@@ -175,3 +175,18 @@ def test_the_daily_job_sends_the_account_to_the_dashboard_and_nothing_of_it_to_t
     assert snap["account"]["positions"][0]["liquidation"] == pytest.approx(1262.40)
     for secret in ("4.5321", "1262", "2311", "5004", UUID):
         assert secret not in captured.out + captured.err, secret
+
+
+def test_a_bare_ed25519_secret_needs_its_id_and_works_with_it(monkeypatch):
+    text, private = ed_key_json()
+    secret = json.loads(text)["privateKey"]
+    assert len(secret) == 88
+    with pytest.raises(DataError, match="secret on its own") as exc:
+        coinbase.load_key(secret)
+    assert secret not in str(exc.value) and coinbase.ENV_ID in str(exc.value)
+    monkeypatch.setenv(coinbase.ENV, secret)
+    monkeypatch.setenv(coinbase.ENV_ID, " 7d9f0c2e-key-id \n")
+    key = coinbase.env_key()
+    assert key.alg == "EdDSA" and key.id == "7d9f0c2e-key-id"
+    _, _, sig, signed = parts(coinbase.token(key, "GET", "/api/v3/brokerage/portfolios"))
+    private.public_key().verify(sig, signed)

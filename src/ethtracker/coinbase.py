@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from .data import DataError
 
 ENV = "COINBASE_API_KEY_JSON"
+ENV_ID = "COINBASE_API_KEY_ID"  # the key's ID, when COINBASE_API_KEY_JSON holds only its secret
 HOST = "api.coinbase.com"
 BASE = f"https://{HOST}"
 ETH_PERP = re.compile(r"^ETH[-_]")  # ETH-PERP-INTX, ETH-PERP, ETH_USDC-PERPETUAL ...
@@ -50,7 +51,15 @@ PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.+?-----END [A-Z ]*PRIVATE 
 KEY_NAME = re.compile(r"organizations/[\w-]+/apiKeys/[\w-]+")
 
 
-def _parse(text: str) -> dict:
+def _bare_secret(text: str) -> bool:
+    """An Ed25519 key's secret on its own: base64 of 32 or 64 bytes (44 or 88 characters)."""
+    try:
+        return len(base64.b64decode(text, validate=True)) in (32, 64)
+    except ValueError:
+        return False
+
+
+def _parse(text: str, key_id: str | None = None) -> dict:
     """The key file's fields. Accepts the file as downloaded, the same with real line breaks inside the private key
     (as copied from a screen), or just the key name and the PEM block pasted one after the other."""
     text = text.strip().lstrip("\ufeff")
@@ -62,16 +71,23 @@ def _parse(text: str) -> dict:
         except ValueError:
             pass
     pem, name = PEM.search(text), KEY_NAME.search(text)
-    if pem and name:
-        return {"name": name.group(0), "privateKey": pem.group(0)}
+    if pem and (name or key_id):
+        return {"name": name.group(0) if name else key_id.strip(), "privateKey": pem.group(0)}
+    if _bare_secret(text):
+        if key_id:
+            return {"id": key_id.strip(), "privateKey": text}
+        raise DataError(
+            f"{ENV} holds the key's secret on its own ({len(text)} characters of base64), without the key's ID. "
+            f"Add the ID as a second secret named {ENV_ID} (the 'API key ID' shown for this key in the Coinbase "
+            "Developer Platform), or replace this one with the whole downloaded .json file's text")
     raise DataError(
         f"{ENV} is not a key file: {len(text)} characters, starts with '{{': {'yes' if text.startswith('{') else 'no'}, "
         f"a private key block: {'yes' if pem else 'no'}, a key name (organizations/.../apiKeys/...): "
         f"{'yes' if name else 'no'}. Paste the whole downloaded .json file's text")
 
 
-def load_key(text: str) -> Key:
-    data = _parse(text)
+def load_key(text: str, key_id: str | None = None) -> Key:
+    data = _parse(text, key_id)
     key_id = data.get("name") or data.get("id") or data.get("keyName")
     secret = data.get("privateKey") or data.get("private_key") or data.get("secret")
     if not key_id or not secret:
@@ -89,7 +105,7 @@ def load_key(text: str) -> Key:
 
 def env_key() -> Key | None:
     text = os.environ.get(ENV)
-    return load_key(text) if text else None
+    return load_key(text, os.environ.get(ENV_ID)) if text else None
 
 
 def _b64(data: bytes) -> str:

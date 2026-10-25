@@ -48,6 +48,7 @@ jobs:
           ETHTRACKER_DASHBOARD_URL: ${{ secrets.ETHTRACKER_DASHBOARD_URL }}
           ETHTRACKER_INGEST_TOKEN: ${{ secrets.ETHTRACKER_INGEST_TOKEN }}
           COINBASE_API_KEY_JSON: ${{ secrets.COINBASE_API_KEY_JSON }}
+          COINBASE_API_KEY_ID: ${{ secrets.COINBASE_API_KEY_ID }}
         run: |
           if [ -n "$ETHTRACKER_DASHBOARD_URL" ] && [ -n "$ETHTRACKER_INGEST_TOKEN" ]; then
             ethtracker cloud-run
@@ -61,6 +62,7 @@ jobs:
         continue-on-error: true
         env:
           COINBASE_API_KEY_JSON: ${{ secrets.COINBASE_API_KEY_JSON }}
+          COINBASE_API_KEY_ID: ${{ secrets.COINBASE_API_KEY_ID }}
         run: ethtracker account-check
       # The dashboard's market panels as text, from live data: market facts only, never the plan's floor.
       - name: Market context
