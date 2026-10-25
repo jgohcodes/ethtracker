@@ -14,6 +14,7 @@ rates of "the pullback is over" signals, so none of them is mistaken for a high-
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -183,3 +184,63 @@ def ladder_stats(history: pd.DataFrame) -> dict[float, pullbacks.Rung]:
     """Fill rates and outcomes of orders under the close, from pullback days if ETH is in one, else every day."""
     placed_on = None if pullbacks.in_pullback(history)[-1] else np.ones(len(history), dtype=bool)
     return {r.depth: r for r in pullbacks.ladder(history, depths=LADDER_DEPTHS, placed_on=placed_on)}
+
+
+# ---- buying now, or bidding lower, when every buy is sized to the floor ---------------------------------
+
+@dataclass(frozen=True)
+class Entry:
+    depth: float  # 0 is buying at the close
+    starts: int
+    episodes: int
+    filled: float  # share of orders that filled (the rest buy at the close when the order expires)
+    eth: float  # median ETH bought per dollar, against buying at the close
+    liquidated: float  # share whose floor was reached within the horizon
+    value: float  # median account value per dollar at the horizon, 0 if liquidated
+    beat_now: float  # share that ended worth more than buying at the close
+
+
+def entry_vs_bid(full: pd.DataFrame, under: float, mmr: float, depths=LADDER_DEPTHS, days: int = pullbacks.BID_DAYS,
+                 horizon: int = 365, placed_on: np.ndarray | None = None) -> list[Entry]:
+    """From each start day: put one dollar to work with the liquidation price held at a floor ``under`` the close,
+    either at that close or through an order ``depth`` under it, good for ``days`` (bought at the close if it never
+    fills). Sized to the floor, a lower fill buys more ETH for the same dollar and the same liquidation price.
+    Fees and funding are left out: both entries pay about the same."""
+    close, low, open_ = (full[c].to_numpy(float) for c in ("close", "low", "open"))
+    n = len(close)
+    mask = pullbacks.in_pullback(full) if placed_on is None else np.asarray(placed_on, dtype=bool)
+    starts = [i for i in np.flatnonzero(mask) if i + horizon < n]
+    episodes = int(swing._first(mask)[: starts[-1] + 1].sum()) if starts else 0
+
+    def outcome(i, j, price, floor):  # bought on day j at price; liquidated if a later low (or the fill day's) reaches the floor
+        qty = 1.0 / (price - floor * (1 - mmr))
+        end = i + horizon
+        dead = low[j:end + 1].min() <= floor if j > i else low[i + 1:end + 1].min() <= floor
+        return qty, 0.0 if dead else 1.0 + qty * (close[end] - price), dead
+
+    now = {}
+    for i in starts:
+        floor = close[i] * (1 - under)
+        now[i] = outcome(i, i, close[i], floor)
+    rows = [Entry(0.0, len(starts), episodes, 1.0, 1.0, float(np.mean([v[2] for v in now.values()])) if starts else float("nan"),
+                  float(np.median([v[1] for v in now.values()])) if starts else float("nan"), float("nan"))]
+    for depth in depths:
+        fills, ratios, values, deaths, beats = 0, [], [], [], []
+        for i in starts:
+            floor, bid = close[i] * (1 - under), close[i] * (1 - depth)
+            hit = np.flatnonzero(low[i + 1:i + days + 1] <= bid)
+            if len(hit):
+                j = i + 1 + int(hit[0])
+                fills += 1
+                qty, value, dead = outcome(i, j, min(bid, open_[j]), floor)
+            else:
+                j = i + days
+                qty, value, dead = outcome(i, j, close[j], floor)
+            ratios.append(qty / now[i][0])
+            values.append(value)
+            deaths.append(dead)
+            beats.append(value > now[i][1])
+        rows.append(Entry(depth, len(starts), episodes, fills / len(starts) if starts else float("nan"),
+                          float(np.median(ratios)) if starts else float("nan"), float(np.mean(deaths)) if starts else float("nan"),
+                          float(np.median(values)) if starts else float("nan"), float(np.mean(beats)) if starts else float("nan")))
+    return rows

@@ -301,6 +301,33 @@ def cmd_context(args, ctx: Ctx) -> int:
     return 0
 
 
+ENTRY_FLOORS = (0.40, 0.50)  # floors under the entry close, generic for public logs
+
+
+def cmd_entry_study(args, ctx: Ctx) -> int:
+    asset, full, cfg, _ = _asset_history(args, ctx, "put cash to work now, or bid lower, when each buy is sized "
+                                                    "to a liquidation floor?")
+    pull = pullbacks.in_pullback(full)
+    regimes = (("every 15%+ pullback day", pull), ("pullback days above the 200-day average", pull & cycles.above_trend(full)))
+    for under in ENTRY_FLOORS + ((args.under,) if args.under else ()):
+        for label, mask in regimes:
+            rows = plan.entry_vs_bid(full, under, cfg.maintenance_margin_rate, placed_on=mask)
+            if not rows or not rows[0].starts:
+                continue
+            print()
+            print(f"Floor {under:.0%} under the entry-day close; from {label}: {rows[0].starts} starts in {rows[0].episodes} "
+                  f"pullbacks. Orders good for {pullbacks.BID_DAYS} days, else bought at the close then. A year on, per dollar")
+            print(f"  {'entry':<18} {'filled':>7} {'ETH vs now':>11} {'liquidated':>11} {'median value':>13} {'beat buying now':>16}")
+            for r in rows:
+                name = "at the close (now)" if r.depth == 0 else f"order {r.depth:.0%} under"
+                beat = "" if r.depth == 0 else f"{r.beat_now:.0%}"
+                print(f"  {name:<18} {r.filled:>7.0%} {r.eth:>10.2f}x {r.liquidated:>11.0%} {r.value:>12.2f}x {beat:>16}")
+    print()
+    print("Sized to the floor, a dollar buys 1 / (price - floor x (1 - maintenance margin)) ETH, so a lower fill buys more ETH "
+          "with the same liquidation price. Fees and funding are left out; overlapping starts within one pullback are not independent.")
+    return 0
+
+
 def cmd_price(args, ctx: Ctx) -> int:
     print(f"{_provider(args, ctx).spot():.2f}")
     return 0
@@ -1612,6 +1639,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
     sp.add_argument("--floor", type=float, help="your liquidation floor, in dollars")
+
+    sp = add("entry-study", cmd_entry_study, "put cash to work now or bid lower, when each buy is sized to a liquidation floor")
+    sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
+    sp.add_argument("--under", type=float, help="also a floor this far under the entry close, as a fraction (0.47)")
 
     sp = add("pullback-study", cmd_pullback_study, "how often 'the pullback is over' signals were right, buy orders under the price, and weekly adding")
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")

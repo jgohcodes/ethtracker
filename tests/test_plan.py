@@ -264,3 +264,43 @@ def test_context_prints_the_market_panels_and_a_floor_only_when_asked(capsys, tm
     assert "$1,237" not in text
     code, text = run(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "context", "--floor", 1237)
     assert code == 0 and "$1,237" in text
+
+
+# ---- buying now or bidding lower, sized to the floor ----------------------------------------------
+
+def test_a_lower_fill_buys_more_eth_for_the_same_floor_and_an_unfilled_order_buys_when_it_expires():
+    from tests.test_cycles import path
+    closes, lows = [100.0] * 400, [100.0] * 400
+    lows[1] = 90.0  # a 10% wick the day after the start, then flat
+    start = np.zeros(400, dtype=bool)
+    start[0] = True
+    rows = {r.depth: r for r in plan.entry_vs_bid(path(closes, lows=lows), 0.5, MMR, placed_on=start)}
+    reach = 50.0 * (1 - MMR)
+    assert rows[0.0].starts == 1 and rows[0.0].value == pytest.approx(1.0) and rows[0.0].liquidated == 0.0
+    assert rows[0.05].filled == 1.0 and rows[0.05].eth == pytest.approx((100 - reach) / (95 - reach))
+    assert rows[0.05].value == pytest.approx(1 + 5 / (95 - reach)) and rows[0.05].beat_now == 1.0
+    assert rows[0.13].filled == 0.0 and rows[0.13].eth == pytest.approx(1.0) and rows[0.13].beat_now == 0.0
+
+
+def test_reaching_the_floor_wipes_out_either_entry():
+    from tests.test_cycles import path
+    closes, lows = [100.0] * 400, [100.0] * 400
+    lows[1], lows[200] = 90.0, 45.0  # the floor is 50
+    start = np.zeros(400, dtype=bool)
+    start[0] = True
+    rows = plan.entry_vs_bid(path(closes, lows=lows), 0.5, MMR, placed_on=start)
+    assert all(r.liquidated == 1.0 and r.value == 0.0 for r in rows)
+
+
+def test_entry_study_command(capsys, tmp_path, monkeypatch):
+    from ethtracker import derivs
+    df = synthetic_candles(1500, seed=9)
+    out = df.copy()
+    out.insert(0, "date", out.index.strftime("%Y-%m-%d"))
+    out.to_csv(tmp_path / "eth.csv", index=False)
+    monkeypatch.setattr(derivs, "fetch_funding_history",
+                        lambda start, end, **kw: (pd.Series(0.0001, index=pd.date_range(start, end, freq="D", tz="UTC")), 0))
+    code, text = run(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "entry-study")
+    assert code == 0
+    for heading in ("Floor 40% under", "Floor 50% under", "at the close (now)", "order 13% under", "beat buying now"):
+        assert heading in text, heading
