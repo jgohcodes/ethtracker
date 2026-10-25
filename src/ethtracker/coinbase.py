@@ -192,10 +192,38 @@ def probe(client: Client) -> list[str]:
                 lines.append(f"  ETH perpetual {name[:-1]} returned: {'yes' if eth else 'no'}"
                              + (f"; fields {', '.join(fields)}" if fields else ""))
                 if eth and name == "positions":
-                    lines.append(f"    values read: {_read(position_from(eth[0]), skip=('product', 'side'))}")
+                    parsed = position_from(eth[0])
+                    lines.append(f"    values read: {_read(parsed, skip=('product', 'side'))}")
+                    for key, names in POSITION_FIELDS.items():
+                        if parsed[key] is None:
+                            field = next((n for n in names if n in eth[0]), names[0])
+                            lines.append(f"    not read: {key} from {field} = {_describe(eth[0].get(field))}")
             if label[0] == "perpetuals portfolio summary" and isinstance(body, dict):
                 lines.append(f"  values read: {_read(summary_from(body))}")
     return lines
+
+
+def _describe(v, depth: int = 0) -> str:
+    """A value's shape with nothing of its content: types, keys, and whether text is empty or a number."""
+    if isinstance(v, dict):
+        if depth > 2:
+            return "{...}"
+        return "{" + ", ".join(f"{k}: {_describe(x, depth + 1)}" for k, x in v.items()) + "}"
+    if isinstance(v, list):
+        return f"a list of {len(v) and _describe(v[0], depth + 1) or 'nothing'}"
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true/false"
+    if isinstance(v, (int, float)):
+        return "a number"
+    if v == "":
+        return "empty text"
+    try:
+        float(v)
+        return "number text"
+    except (TypeError, ValueError):
+        return "other text"
 
 
 def _read(parsed: dict, skip=()) -> str:
@@ -260,23 +288,38 @@ def _first(d: dict, *names):
     return None
 
 
+POSITION_FIELDS = {  # what the dashboard shows: the field names Coinbase's endpoints use for it, in order of preference
+    "size": ("net_size", "number_of_contracts", "size"),
+    "entry": ("entry_vwap", "vwap", "avg_entry_price", "entry_price"),
+    "mark": ("mark_price", "current_price"),
+    "liquidation": ("liquidation_price",),
+    "unrealized": ("unrealized_pnl",),
+    "leverage": ("leverage",),
+    "notional": ("position_notional",),
+    "maintenance": ("mm_notional",),
+}
+
+
 def position_from(item: dict) -> dict:
     side = str(_first(item, "position_side", "side") or "").upper()
-    size = _num(_first(item, "net_size", "number_of_contracts", "size"))
-    if size is not None and "SHORT" in side and size > 0:
-        size = -size
-    return {
-        "product": _first(item, "product_id", "symbol"),
-        "side": "short" if "SHORT" in side else "long",
-        "size": size,
-        "entry": _num(_first(item, "entry_vwap", "vwap", "avg_entry_price", "entry_price")),
-        "mark": _num(_first(item, "mark_price", "current_price")),
-        "liquidation": _num(_first(item, "liquidation_price")),
-        "unrealized": _num(_first(item, "unrealized_pnl")),
-        "leverage": _num(_first(item, "leverage")),
-        "notional": _num(_first(item, "position_notional")),
-        "maintenance": _num(_first(item, "mm_notional")),
-    }
+    out = {"product": _first(item, "product_id", "symbol"), "side": "short" if "SHORT" in side else "long"}
+    for key, names in POSITION_FIELDS.items():
+        out[key] = _num(_first(item, *names))
+    if out["size"] is not None and "SHORT" in side and out["size"] > 0:
+        out["size"] = -out["size"]
+    out["liquidation_from"] = "exchange" if out["liquidation"] is not None else None
+    return out
+
+
+def liquidation_from_buffer(p: dict, buffer: float | None) -> float | None:
+    """A long's liquidation price from the portfolio's liquidation buffer (collateral above the maintenance
+    margin), when the position is the portfolio's only one. Falling d in price costs size * d of equity and
+    frees maintenance margin * size * d, so the buffer is gone after buffer / (size * (1 - m))."""
+    size, mark = p.get("size"), p.get("mark")
+    if buffer is None or not size or size <= 0 or not mark:
+        return None
+    m = p["maintenance"] / p["notional"] if p.get("maintenance") and p.get("notional") else 0.0
+    return max(0.0, mark - buffer / (size * (1 - m)))
 
 
 def summary_from(body: dict) -> dict:
@@ -297,13 +340,15 @@ def fill_from(item: dict) -> dict:
 
 def account(client: Client) -> dict:
     """Your ETH perpetual positions, the perpetuals portfolio's collateral and recent ETH perpetual fills."""
-    positions, summary = [], {}
+    positions, summary, held = [], {}, 0
     for p in _portfolios(client):
         if "INTX" not in str(p.get("type", "")).upper() or not p.get("uuid"):
             continue
         status, body = client.get(f"/api/v3/brokerage/intx/positions/{p['uuid']}")
         if status == 200 and isinstance(body, dict):
-            positions += [position_from(i) for i in body.get("positions", []) if isinstance(i, dict)]
+            items = [i for i in body.get("positions", []) if isinstance(i, dict)]
+            held += len(items)
+            positions += [position_from(i) for i in items]
         status, body = client.get(f"/api/v3/brokerage/intx/portfolio/{p['uuid']}")
         if status == 200 and isinstance(body, dict):
             summary = summary_from(body)
@@ -315,5 +360,8 @@ def account(client: Client) -> dict:
     if status == 200 and isinstance(body, dict):
         fills = [fill_from(i) for i in body.get("fills", []) if isinstance(i, dict) and _is_eth_perp(i)]
     eth = [p for p in positions if _is_eth_perp({"product_id": p.get("product")})]
+    if held == 1 and len(eth) == 1 and eth[0]["liquidation"] is None and summary:
+        eth[0]["liquidation"] = liquidation_from_buffer(eth[0], summary.get("liquidation_buffer"))
+        eth[0]["liquidation_from"] = "buffer" if eth[0]["liquidation"] is not None else None
     return {"source": "coinbase", "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "positions": eth, "summary": summary or None, "fills": fills[:20]}

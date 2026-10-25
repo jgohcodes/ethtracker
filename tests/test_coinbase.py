@@ -225,3 +225,40 @@ def test_amounts_nested_by_currency_read_in_the_contracts_currency_and_the_probe
     assert "values read: collateral yes, unrealized yes, liquidation_buffer yes" in lines
     for secret in ("4.5321", "2311", "1262", "5004", "4521", "9.6", UUID):
         assert secret not in lines, secret
+
+
+class CrossMarginClient(NestedClient):
+    """A cross-margined position whose own liquidation price and leverage come back empty."""
+
+    def get(self, path, params=None):
+        status, body = super().get(path, params)
+        if "/intx/positions/" in path:
+            body["positions"][0]["liquidation_price"] = {"rawCurrency": {"value": "", "currency": "USDC"}}
+            body["positions"][0]["leverage"] = ""
+        return status, body
+
+
+def test_a_missing_liquidation_price_comes_from_the_buffer_and_the_probe_describes_the_field_without_values():
+    (p,) = coinbase.account(CrossMarginClient())["positions"]
+    m = 212.15 / 10607.43
+    assert p["liquidation_from"] == "buffer"
+    assert p["liquidation"] == pytest.approx(2340.55 - 4521.0 / (4.5321 * (1 - m)))
+    # a price that far down eats exactly the buffer: equity lost less maintenance freed
+    d = 2340.55 - p["liquidation"]
+    assert 4.5321 * d - m * 4.5321 * d == pytest.approx(4521.0)
+    lines = "\n".join(coinbase.probe(CrossMarginClient()))
+    assert "not read: liquidation from liquidation_price = {rawCurrency: {value: empty text, currency: other text}}" in lines
+    assert "not read: leverage from leverage = empty text" in lines
+    for secret in ("4.5321", "2311", "4521", "USDC", UUID):
+        assert secret not in lines, secret
+
+
+def test_no_buffer_estimate_when_the_portfolio_holds_other_positions_too():
+    class TwoPositions(CrossMarginClient):
+        def get(self, path, params=None):
+            status, body = super().get(path, params)
+            if "/intx/positions/" in path:
+                body["positions"].append({"product_id": "BTC-PERP-INTX", "position_side": "POSITION_SIDE_LONG", "net_size": "0.1"})
+            return status, body
+    (p,) = coinbase.account(TwoPositions())["positions"]
+    assert p["liquidation"] is None and p["liquidation_from"] is None

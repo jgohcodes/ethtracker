@@ -403,7 +403,7 @@ function renderAccount(s) {
       h("div", { class: "metrics" },
         metric("Entry (average)", usd(p.entry)),
         metric("Mark", usd(p.mark)),
-        metric("Liquidation, per Coinbase", usd(liq)),
+        metric(p.liquidation_from === "buffer" ? "Liquidation, from Coinbase's buffer" : "Liquidation, per Coinbase", usd(liq)),
         gap === null ? null : metric("Versus this tool's estimate", `${gap >= 0 ? "+" : "−"}${usd(Math.abs(gap))}`),
         metric("Open PnL", delta(p.unrealized, signedUsd(p.unrealized))),
         p.leverage === null || p.leverage === undefined ? null : metric("Leverage", `${fixed(p.leverage, 2)}x`),
