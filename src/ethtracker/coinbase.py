@@ -206,6 +206,33 @@ def probe(client: Client) -> list[str]:
     if held:
         lines.append("open trades rebuilt from fills: " + "; ".join(
             "all found" if p.get("trades_complete") else "older fills needed (shown as an earlier trade)" for p in held))
+        lines += [f"  {line}" for line in _fills_against(client, held[0])]
+    return lines
+
+
+def _fills_against(client: Client, p: dict) -> list[str]:
+    """How the fills read compare with the position, without amounts: kinds, units, a ratio and an age bucket."""
+    meta: dict = {}
+    fills = eth_fills(client, p["product"], meta)
+    same = [f for f in fills if f["product"] == p["product"]]
+    net = sum(f["size"] * (1 if f["side"] == "buy" else -1) for f in same if f["size"])
+    oldest = min((pd_time(f["time"]) for f in same if f["time"]), default=None)
+    age = None if oldest is None else (time.time() - oldest) / 86400
+    bucket = "none" if age is None else "under 2 days" if age < 2 else "under 2 weeks" if age < 14 else "under 3 months" if age < 92 else "older"
+    ratio = net / p["size"] if p.get("size") else None
+    return [
+        f"fills: product filter used {'yes' if meta.get('filtered') else 'no'}, every page read {'yes' if meta.get('ended') else 'no'}, "
+        f"same product id as the position {'yes' if len(same) == len(fills) and fills else 'no' if fills else 'n/a'}",
+        f"fills: kinds {', '.join(sorted({f['type'] or '?' for f in fills})) or 'none'}; sides {', '.join(sorted({f['side'] or '?' for f in fills})) or 'none'}; "
+        f"sized in quote currency {', '.join(sorted({'yes' if f['in_quote'] else 'no' for f in fills})) or 'n/a'}",
+        f"fills: net bought / position size = {'n/a' if ratio is None else f'{ratio:.2g}'}; oldest fill read: {bucket}",
+    ]
+
+
+def pd_time(value: str) -> float:
+    """Seconds since the epoch for an exchange time like 2026-10-25T17:02:11.123Z."""
+    from datetime import datetime
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
     return lines
 
 
@@ -349,13 +376,15 @@ def fill_from(item: dict) -> dict:
         size = size / price  # an order placed in USDC reports its size in USDC
     return {"time": _first(item, "trade_time", "created_time", "time"), "product": item.get("product_id"),
             "order": item.get("order_id"), "side": str(item.get("side", "")).lower(), "size": size, "price": price,
-            "fee": _num(item.get("commission"))}
+            "fee": _num(item.get("commission")), "type": str(item.get("trade_type") or ""),
+            "in_quote": str(item.get("size_in_quote")).lower() == "true"}
 
 
-def eth_fills(client: Client, product: str | None) -> list[dict]:
-    """Up to FILL_PAGES pages of the ETH perpetual's fills, newest first (Coinbase's order)."""
+def eth_fills(client: Client, product: str | None, meta: dict | None = None) -> list[dict]:
+    """Up to FILL_PAGES pages of the ETH perpetual's fills, newest first (Coinbase's order). ``meta``, if given,
+    is filled with whether the product filter was used and whether the pages reached the oldest fill."""
     def pages(params):
-        out, cursor = [], None
+        out, cursor, ended = [], None, False
         for _ in range(FILL_PAGES):
             status, body = client.get("/api/v3/brokerage/orders/historical/fills", {**params, **({"cursor": cursor} if cursor else {})})
             if status != 200 or not isinstance(body, dict):
@@ -364,10 +393,16 @@ def eth_fills(client: Client, product: str | None) -> list[dict]:
             out += [fill_from(i) for i in items if _is_eth_perp(i)]
             cursor = body.get("cursor")
             if not cursor or not items:
+                ended = True
                 break
-        return out
-    fills = pages({"product_ids": [product], "limit": 100}) if product else []
-    return fills or pages({"limit": 100})  # if the filter is not honoured for perps, read everything and keep ETH
+        return out, ended
+    fills, ended = pages({"product_ids": [product], "limit": 100}) if product else ([], False)
+    filtered = bool(fills)
+    if not fills:  # if the filter is not honoured for perps, read everything and keep ETH
+        fills, ended = pages({"limit": 100})
+    if meta is not None:
+        meta.update(filtered=filtered, ended=ended)
+    return fills
 
 
 def open_trades(fills: list[dict], net_size: float | None) -> dict:

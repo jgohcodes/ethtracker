@@ -325,3 +325,19 @@ def test_fills_are_paged_until_the_cursor_runs_out():
     client = Paged()
     fills = coinbase.eth_fills(client, "ETH-PERP-INTX")
     assert len(fills) == 3 and client.seen[0]["product_ids"] == ["ETH-PERP-INTX"] and client.seen[-1]["cursor"] == "2"
+
+
+def test_the_check_compares_fills_with_the_position_without_amounts():
+    class Partial(FakeClient):  # the fills explain half of the position
+        def get(self, path, params=None):
+            if path.endswith("/fills"):
+                return 200, {"fills": [{"product_id": "ETH-PERP-INTX", "side": "BUY", "size": "2.26605", "price": "2311.17",
+                                        "trade_time": "2026-10-25T17:02:11Z", "order_id": "o", "trade_type": "FILL", "size_in_quote": False}],
+                             "cursor": ""}
+            return super().get(path, params)
+    lines = "\n".join(coinbase.probe(Partial()))
+    assert "open trades rebuilt from fills: older fills needed" in lines
+    assert "product filter used yes, every page read yes, same product id as the position yes" in lines
+    assert "kinds FILL; sides buy; sized in quote currency no" in lines and "net bought / position size = 0.5;" in lines
+    for secret in ("4.5321", "2.266", "2311", UUID):
+        assert secret not in lines, secret
