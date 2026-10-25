@@ -116,3 +116,32 @@ def test_score_study_command(capsys, tmp_path, monkeypatch):
     for heading in ("Each part against ETH's next 30 days", "Chance alone", "literature weights (the score)",
                     "What followed each score bucket", "Today: score"):
         assert heading in text, heading
+
+
+def test_turning_points_need_a_full_swing_and_alternate():
+    closes = [100.0, 120.0, 140.0, 130.0, 95.0, 90.0, 100.0, 125.0, 130.0, 85.0]
+    pts = score.pivots(path(closes)["close"], swing=0.30)
+    assert [(k, p) for _, k, p in pts] == [("top", 140.0), ("bottom", 90.0), ("top", 130.0)]
+
+
+def test_a_score_that_turns_after_the_top_has_a_positive_lag_and_one_before_a_negative_one():
+    closes = [100.0, 120.0, 140.0, 130.0, 95.0, 90.0, 80.0, 70.0]
+    df = path(closes)
+    late = pd.Series([0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5], index=df.index)
+    (top,) = [r for r in score.turns(df["close"], late) if r["kind"] == "top"]
+    assert top["lag"] == 2 and top["at_flip"] == pytest.approx(95 / 140 - 1)
+    assert top["left"] == pytest.approx((70 - 95) / (70 - 140))  # the swing runs to the last close: still running
+    early = pd.Series([0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5], index=df.index)
+    (top,) = [r for r in score.turns(df["close"], early) if r["kind"] == "top"]
+    assert top["lag"] == -1
+
+
+def test_a_score_made_of_the_future_leads_and_one_made_of_the_past_echoes():
+    df = synthetic_candles(800, seed=3)
+    close = df["close"]
+    future = np.sign(close.shift(-7) / close - 1)
+    assert score.lead(close, future, horizons=(7,))[7] > 0.8
+    past = np.sign(close / close.shift(7) - 1)
+    assert score.echo(close, past, horizons=(7,))[7] > 0.8
+    assert score.stale(close, future, ages=(0, 60), horizon=7)[60] < 0.3
+    assert score.flips_per_year(pd.Series([1.0, 1.0, -1.0, -1.0, 1.0], index=pd.date_range("2024-01-01", periods=5, freq="182D"))) > 0

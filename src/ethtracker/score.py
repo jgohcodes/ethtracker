@@ -244,3 +244,119 @@ def unscored(cfg, frame: pd.DataFrame, derivs: pd.DataFrame | None) -> list[dict
             if back == 0:
                 row.update(state=g.bias, risk=g.risk, headline=g.headline, unvalidated=g.unvalidated)
     return [r for r in rows.values() if "headline" in r]
+
+
+# ---- the score against price: echo, lead, and how late it turns -------------------------------------
+
+LEADS = (1, 3, 7, 14, 30, 60, 90, 180)  # days ahead
+AGES = (0, 3, 7, 14, 30, 60)  # how old a score is when acted on
+ECHOES = (7, 28, 90)  # days back
+SWING = 0.30  # a turning point is a high or low ETH then moved 30% away from
+
+
+def _ahead(close: pd.Series, days: int) -> pd.Series:
+    return close.shift(-days) / close - 1
+
+
+def lead(close: pd.Series, score: pd.Series, horizons=LEADS, mask: pd.Series | None = None) -> dict[int, float]:
+    """Rank correlation of today's score with the return over the next ``h`` days, for each ``h``."""
+    out = {}
+    for h in horizons:
+        fwd = _ahead(close, h)
+        m = score.notna() & fwd.notna() & (True if mask is None else mask)
+        out[h] = rank_ic(score[m], fwd[m])
+    return out
+
+
+def stale(close: pd.Series, score: pd.Series, ages=AGES, horizon: int = HORIZON) -> dict[int, float]:
+    """Acting on a score ``k`` days old: its rank correlation with the next ``horizon`` days from today."""
+    fwd = _ahead(close, horizon)
+    out = {}
+    for k in ages:
+        old = score.shift(k)
+        m = old.notna() & fwd.notna()
+        out[k] = rank_ic(old[m], fwd[m])
+    return out
+
+
+def echo(close: pd.Series, score: pd.Series, horizons=ECHOES) -> dict[int, float]:
+    """Rank correlation of today's score with the return over the past ``h`` days: how much it repeats price."""
+    out = {}
+    for h in horizons:
+        back = close / close.shift(h) - 1
+        m = score.notna() & back.notna()
+        out[h] = rank_ic(score[m], back[m])
+    return out
+
+
+def chance_leads(cfg, df: pd.DataFrame, runs: int = 30, seed: int = 1) -> dict[int, float]:
+    """The spread of each forward rank correlation with ETH's days shuffled: the no-edge yardstick per horizon."""
+    rng = np.random.default_rng(seed)
+    seen: dict[int, list[float]] = {h: [] for h in LEADS}
+    for _ in range(runs):
+        fake = shuffled(df, rng)
+        for h, ic in lead(fake["close"], combine(states(cfg, fake))).items():
+            seen[h].append(ic)
+    return {h: float(np.nanstd(v)) for h, v in seen.items()}
+
+
+def pivots(close: pd.Series, swing: float = SWING) -> list[tuple[pd.Timestamp, str, float]]:
+    """Turning points on closes: a high is confirmed once price falls ``swing`` below it, a low once price rises
+    ``swing`` above it (hindsight, for measuring lags only)."""
+    out: list[tuple[pd.Timestamp, str, float]] = []
+    hi_t = lo_t = close.index[0]
+    hi = lo = float(close.iloc[0])
+    direction = 0  # +1 looking for the next high, -1 for the next low
+    for t, p in close.items():
+        p = float(p)
+        if direction >= 0 and p > hi:
+            hi, hi_t = p, t
+        if direction <= 0 and p < lo:
+            lo, lo_t = p, t
+        if direction >= 0 and p <= hi * (1 - swing):
+            out.append((hi_t, "top", hi))
+            direction, lo, lo_t = -1, p, t
+        elif direction <= 0 and p >= lo * (1 + swing):
+            out.append((lo_t, "bottom", lo))
+            direction, hi, hi_t = 1, p, t
+    return [x for x in out if x[0] != close.index[0]]  # the first day is where the data starts, not a turn
+
+
+def turns(close: pd.Series, score: pd.Series, swing: float = SWING) -> list[dict]:
+    """At each turning point: when the score crossed zero the new way (days after; negative = before), the price
+    then, and how much of the swing to the next turning point was still to come."""
+    points = pivots(close, swing)
+    rows = []
+    for k, (t, kind, price) in enumerate(points):
+        want = (score < 0) if kind == "top" else (score > 0)
+        at = score.index.get_loc(t)
+        if pd.isna(score.iloc[at]):
+            continue
+        if want.iloc[at]:  # already flipped: find when, looking back
+            before = (~want.iloc[: at + 1]) & score.iloc[: at + 1].notna()
+            idx = np.flatnonzero(before.to_numpy())
+            flip = idx[-1] + 1 if len(idx) else 0
+        else:
+            ahead = np.flatnonzero(want.iloc[at:].to_numpy())
+            if not len(ahead):
+                continue
+            flip = at + int(ahead[0])
+        flip_t = score.index[flip]
+        flip_price = float(close.iloc[flip])
+        nxt = points[k + 1] if k + 1 < len(points) else None
+        end_price = nxt[2] if nxt else float(close.iloc[-1])
+        swing_size = end_price / price - 1
+        rows.append({
+            "date": t, "kind": kind, "price": price, "flip": flip_t, "lag": int((flip_t - t).days),
+            "at_flip": flip_price / price - 1, "swing": swing_size, "complete": nxt is not None,
+            "left": (end_price - flip_price) / (end_price - price) if end_price != price else float("nan"),
+        })
+    return rows
+
+
+def flips_per_year(score: pd.Series) -> float:
+    s = np.sign(score.dropna())
+    s = s[s != 0]
+    changes = int((s != s.shift()).sum()) - 1
+    years = (s.index[-1] - s.index[0]).days / 365.25
+    return changes / years if years > 0 else float("nan")

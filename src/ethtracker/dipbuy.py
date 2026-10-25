@@ -5,7 +5,8 @@ One account on cross margin. A deposit arrives every week. "Every week" puts it 
 ETH closes 20% below its 30-day high (the same dip rule as cycle-study and pullback-study).
 
 How much each buy opens:
-  fixed leverage  the open position grows by L x the cash being put to work (1x is spot, then 2.5x and 3x)
+  spot            coins bought outright: no funding, no liquidation (the yardstick)
+  fixed leverage  the open position grows by L x the cash being put to work (1x, 2.5x, 3x on the perp)
   floor plan      the most the account can hold with its liquidation price at a floor fixed for the window,
                   a set distance under the window's first close, as the adding plan does with $1,250
 
@@ -97,11 +98,14 @@ class Study:
         j = self.full.index.searchsorted(start + pd.DateOffset(years=years), side="right")
         return slice(i, j)
 
-    def pair(self, start: pd.Timestamp, years: int, *, leverage: float | None = None, under: float | None = None) -> Pair:
+    def pair(self, start: pd.Timestamp, years: int, *, leverage: float | None = None, under: float | None = None,
+             spot: bool = False) -> Pair:
         w = self.window(start, years)
         close, low, funding, dips = self.close[w], self.low[w], self.funding[w], self.dips[w]
         floor = None if under is None else close[0] * (1 - under)
-        kw = dict(leverage=leverage, floor=floor, mmr=self.mmr, fee=self.fee)
+        if spot:  # coins held outright: no funding, nothing to liquidate
+            funding, leverage = np.zeros(len(close)), 1.0
+        kw = dict(leverage=leverage, floor=floor, mmr=0.0 if spot else self.mmr, fee=self.fee)
         return Pair(run(close, low, funding, None, **kw), run(close, low, funding, dips, **kw))
 
 
@@ -115,6 +119,7 @@ def summary(pairs: list[Pair]) -> dict:
         "weekly_liquidated": float(np.mean([p.weekly.liquidations > 0 for p in pairs])),
         "dip_liquidated": float(np.mean([p.dip.liquidations > 0 for p in pairs])),
         "weekly_worst": float(weekly.min()), "dip_worst": float(dip.min()),
+        "weekly_above": float(np.mean(weekly > 1)), "dip_above": float(np.mean(dip > 1)),
         "dip_idle": float(np.median([p.dip.idle for p in pairs])),
         "weekly_peak_leverage": float(np.median([p.weekly.peak_leverage for p in pairs])),
         "dip_peak_leverage": float(np.median([p.dip.peak_leverage for p in pairs])),

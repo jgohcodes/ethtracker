@@ -54,6 +54,15 @@ def test_dip_study_command(capsys, tmp_path, monkeypatch):
                         lambda start, end, **kw: (pd.Series(0.0001, index=pd.date_range(start, end, freq="D", tz="UTC")), 0))
     code, text = cli(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "dip-study")
     assert code == 0
-    for heading in ("year windows from a start every 4 weeks", "spot (1x)", "2.5x perp", "3x perp", "floor 45% under start",
-                    "dip beat"):
+    for heading in ("year windows from a start every 4 weeks", "spot, no leverage", "1x perp", "2.5x perp", "3x perp",
+                    "floor 45% under start", "dip beat", "above 1x"):
         assert heading in text, heading
+
+
+def test_spot_pays_no_funding_and_cannot_be_liquidated():
+    df = synthetic_candles(500, seed=2)
+    df.iloc[200:260, df.columns.get_loc("low")] *= 0.05  # a crash that would wipe out any perp
+    study = dipbuy.Study(df, np.full(len(df), 0.001), mmr=0.02, fee=0.0)
+    pair = study.pair(df.index[0], 1, spot=True)
+    assert pair.weekly.liquidations == 0 and pair.dip.liquidations == 0
+    assert study.pair(df.index[0], 1, leverage=1.0).weekly.liquidations == 1

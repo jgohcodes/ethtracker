@@ -497,6 +497,37 @@ def cmd_score_study(args, ctx: Ctx) -> int:
             r = fwd.loc[m, "ret"]
             print(f"  {name:<20} {e:<8} {int(m.sum()):>5} {signals.count_episodes(m):>9} {(r > 0).mean():>7.0%} "
                   f"{r.median():>+8.1%} {fwd.loc[m, 'fell'].astype(bool).mean():>9.0%}")
+    close = full["close"]
+    recent = full.index >= pd.Timestamp(score.RECENT, tz="UTC")
+    print()
+    print("The score against ETH's price")
+    print("  Echo (today's score with the return over the past days): "
+          + ", ".join(f"{h}d {ic:+.2f}" for h, ic in score.echo(close, sc).items()))
+    noise = score.chance_leads(cfg, full)
+    leads = {"all": score.lead(close, sc), "to 2020": score.lead(close, sc, mask=pd.Series(~recent, index=full.index)),
+             "2021 on": score.lead(close, sc, mask=pd.Series(recent, index=full.index))}
+    print("  Lead (today's score with the return over the next days), and chance's spread (one sd, days shuffled):")
+    print(f"    {'days ahead':<12}" + "".join(f"{h:>8}" for h in score.LEADS))
+    for era, row in leads.items():
+        print(f"    {era:<12}" + "".join(f"{row[h]:>+8.2f}" for h in score.LEADS))
+    print(f"    {'chance +/-':<12}" + "".join(f"{noise[h]:>8.2f}" for h in score.LEADS))
+    print("  Acting on an old score (its age, with the next 30 days from today): "
+          + ", ".join(f"{k}d old {ic:+.2f}" for k, ic in score.stale(close, sc).items()))
+    print(f"  The score changes sign about {score.flips_per_year(sc):.0f} times a year.")
+    rows = score.turns(close, sc)
+    if rows:
+        print()
+        print(f"Turning points ({score.SWING:.0%} swings, found with hindsight): how many days the score took to cross zero "
+              "the new way (negative = before the turn), and how much of the swing was still to come")
+        print(f"  {'date':<11} {'turn':<7} {'price':>9} {'flipped':<11} {'lag':>5} {'by then':>8} {'swing':>8} {'still to come':>14}")
+        for r in rows:
+            print(f"  {r['date']:%Y-%m-%d}  {r['kind']:<7} {r['price']:>9,.2f} {r['flip']:%Y-%m-%d}  {r['lag']:>4}d "
+                  f"{r['at_flip']:>+8.1%} {r['swing']:>+8.1%} {r['left']:>13.0%}" + ("" if r["complete"] else "  (running)"))
+        for kind in ("top", "bottom"):
+            done = [r for r in rows if r["kind"] == kind and r["complete"]]
+            if done:
+                print(f"  {kind}s: median lag {np.median([r['lag'] for r in done]):.0f} days; median share of the swing still "
+                      f"to come when the score flipped {np.nanmedian([r['left'] for r in done]):.0%} ({len(done)} turns)")
     today = sc.iloc[-1]
     print()
     print(f"Today: score {today:+.2f} ({score.label(today)}). Parts: "
@@ -504,7 +535,8 @@ def cmd_score_study(args, ctx: Ctx) -> int:
     return 0
 
 
-DIP_SIZINGS = (("spot (1x)", {"leverage": 1.0}), ("2.5x perp", {"leverage": 2.5}), ("3x perp", {"leverage": 3.0}),
+DIP_SIZINGS = (("spot, no leverage", {"spot": True}), ("1x perp", {"leverage": 1.0}), ("2.5x perp", {"leverage": 2.5}),
+               ("3x perp", {"leverage": 3.0}),
                (f"floor {dipbuy.FLOOR_UNDER:.0%} under start", {"under": dipbuy.FLOOR_UNDER}))
 
 
@@ -531,8 +563,8 @@ def cmd_dip_study(args, ctx: Ctx) -> int:
         print(f"{cycles.HORIZON_YEARS}-year windows {title}: {len(starts)} windows"
               + (f" in {drawdowns} separate drawdowns" if drawdowns else "")
               + ". One unit deposited every week; final equity per unit put in.")
-        print(f"  {'sizing':<24} {'starts':<8} {'n':>3} {'weekly':>7} {'dip':>7} {'dip beat':>9} {'liquidated w/d':>15} "
-              f"{'worst w/d':>12} {'dip idle':>9} {'peak lev w/d':>13}")
+        print(f"  {'sizing':<24} {'starts':<8} {'n':>3} {'weekly':>7} {'dip':>7} {'dip beat':>9} {'above 1x w/d':>13} "
+              f"{'liquidated w/d':>15} {'worst w/d':>12} {'dip idle':>9} {'peak lev w/d':>13}")
         for label, kw in DIP_SIZINGS:
             pairs = {d: study.pair(d, cycles.HORIZON_YEARS, **kw) for d in starts}
             for era, subset in eras:
@@ -540,11 +572,13 @@ def cmd_dip_study(args, ctx: Ctx) -> int:
                     continue
                 sm = dipbuy.summary([pairs[d] for d in subset])
                 print(f"  {label:<24} {era:<8} {sm['windows']:>3} {sm['weekly_median']:>6.2f}x {sm['dip_median']:>6.2f}x "
-                      f"{sm['dip_beat']:>9.0%} {sm['weekly_liquidated']:>7.0%} / {sm['dip_liquidated']:<5.0%} "
+                      f"{sm['dip_beat']:>9.0%} {sm['weekly_above']:>5.0%} / {sm['dip_above']:<5.0%} "
+                      f"{sm['weekly_liquidated']:>7.0%} / {sm['dip_liquidated']:<5.0%} "
                       f"{sm['weekly_worst']:>5.2f} / {sm['dip_worst']:<5.2f} {sm['dip_idle']:>9.0%} "
                       f"{sm['weekly_peak_leverage']:>5.1f} / {sm['dip_peak_leverage']:<5.1f}")
     print()
     print("weekly / dip: median final equity per unit put in. dip beat: windows where saving for dips ended ahead. "
+          "above 1x: windows that ended with more than was put in. "
           "liquidated: windows with at least one whole-account liquidation. dip idle: cash still waiting at the end. "
           "peak lev: median of each window's highest position / equity.")
     return 0
