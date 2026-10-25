@@ -54,6 +54,9 @@ jobs:
             echo "::notice title=Dry run::Set the ETHTRACKER_DASHBOARD_URL and ETHTRACKER_INGEST_TOKEN repository secrets to publish. This run fetched live data and published nothing."
             ethtracker cloud-run --dry-run
           fi
+      # The dashboard's market panels as text, from live data: market facts only, never the plan's floor.
+      - name: Market context
+        run: ethtracker context
       - name: Signals study
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'signals')) }}
         run: ethtracker signals-study --days 3000

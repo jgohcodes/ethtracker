@@ -249,3 +249,18 @@ def test_under_a_plan_the_weekly_buys_show_as_one_position_with_each_buy_listed(
     assert [lot["qty"] for lot in book["lots"]] == [4.0, 1.0, 1.0]
     assert sum(lot["unrealized"] for lot in book["lots"]) == pytest.approx(book["unrealized"])
     assert len(json.dumps(snap)) < 256 * 1024
+
+
+def test_context_prints_the_market_panels_and_a_floor_only_when_asked(capsys, tmp_path):
+    df = synthetic_candles(1500, seed=9)
+    out = df.copy()
+    out.insert(0, "date", out.index.strftime("%Y-%m-%d"))
+    out.to_csv(tmp_path / "eth.csv", index=False)
+    code, text = run(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "context")
+    assert code == 0
+    for heading in ("Trend:", "Crowding: funding history unavailable", "Volatility:", "Reaching a floor",
+                    "Every pullback day", "A buy order under the close"):
+        assert heading in text, heading
+    assert "$1,237" not in text
+    code, text = run(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "context", "--floor", 1237)
+    assert code == 0 and "$1,237" in text

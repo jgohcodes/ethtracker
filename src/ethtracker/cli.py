@@ -246,6 +246,61 @@ def cmd_add(args, ctx: Ctx) -> int:
     return 0
 
 
+CONTEXT_FLOORS = (0.30, 0.40, 0.50, 0.60)  # under the last close: generic, so the output is safe for public logs
+
+
+def cmd_context(args, ctx: Ctx) -> int:
+    """The dashboard's market panels in the terminal: trend, crowding, the pullback signals' record, buy-order
+    fill rates and the risk of reaching a floor. Market facts only, unless you pass your own --floor."""
+    provider = _provider(args, ctx)
+    market = _market_context(ctx, provider)
+    full, _ = cycles.ignore_flash_prints(snapshot.closed_candles(market["history"], datetime.now(timezone.utc)))
+    last = float(full["close"].iloc[-1])
+    t = plan.trend(full)
+    print(f"ETH on the {full.index[-1]:%Y-%m-%d} close: {usd(last)} ({len(full)} daily candles from {full.index[0]:%Y-%m-%d})")
+    print(f"Trend: {t['label']}. 50-day {na(t['sma50'], usd)} ({'above' if t['above_50'] else 'below'}), "
+          f"200-day {na(t['sma200'], usd)} ({'above' if t['above_200'] else 'below'}), 28 days {na(t['return_28d'], lambda x: f'{x:+.1%}')}")
+    c = plan.crowding(market["funding8h"])
+    print("Crowding: funding history unavailable" if c is None else
+          f"Crowding: {c['label']}. Funding {c['funding_8h']:.4%}/8h, at the {c['percentile']:.0%} point of the last "
+          f"{c['days']} days (median {c['median_8h']:.4%}, high {c['high_8h']:.4%})")
+
+    floors = [last * (1 - d) for d in CONTEXT_FLOORS] + ([args.floor] if args.floor else [])
+    risks = [plan.floor_risk(full, last, f) for f in floors]
+    vol = risks[0]["vol_forecast"]
+    print(f"Volatility: EWMA forecast {na(vol, pct)} a year, 30-day realised {na(risks[0]['vol_30d'], pct)}")
+    hist = next((r["history"] for r in risks if r["history"]), None)
+    print()
+    print("Reaching a floor. Touch: a driftless random walk at the forecast volatility. History: from days "
+          + (f"{hist['from_depth']:.0%}+ under the high (like today), {hist['starts']} starts in {hist['drawdowns']} drawdowns"
+             if hist else "as deep as today (none with four years after them)"))
+    print(f"  {'floor':>10} {'under':>7} {'sigmas':>7} {'30 days':>8} {'1 year':>7} {'hist 1y':>8} {'hist 4y':>8}")
+    for f, r in zip(floors, risks):
+        h = r["history"] or {}
+        print(f"  {usd(f, 0):>10} {1 - f / last:>7.0%} {na(r['sigmas'], lambda x: f'{x:.2f}'):>7} "
+              f"{na(r['touch_30d'], lambda x: f'{x:.1%}'):>8} {na(r['touch_1y'], lambda x: f'{x:.0%}'):>7} "
+              f"{na(h.get('within_1y'), lambda x: f'{x:.0%}'):>8} {na(h.get('within_4y'), lambda x: f'{x:.0%}'):>8}")
+
+    o = plan.odds(full)
+    print()
+    print(f"Pullback signals ({'in' if o['in_pullback'] else 'not in'} a {o['pullback_depth']:.0%} pullback now). "
+          f"Low held: no further {o['further_fall']:.0%} fall within {o['held_days']} days of the close")
+    print(f"  {'signal':<40} {'last fired':>12} {'times':>6} {'low held':>9} {'95% low':>8} {'up 1y':>6}")
+    for r in o["signals"]:
+        fired = "baseline" if r["baseline"] else (r["last_fired"] or "never")
+        print(f"  {r['name']:<40} {fired:>12} {r['events']:>6} {na(r['held'], lambda x: f'{x:.0%}'):>9} "
+              f"{na(r['held_low'], lambda x: f'{x:.0%}'):>8} {na(r['higher_365'], lambda x: f'{x:.0%}'):>6}")
+
+    print()
+    print("A buy order under the close, good for 30 days, placed on every "
+          + ("pullback day (like today)" if o["in_pullback"] else "day"))
+    print(f"  {'under':>6} {'filled':>7} {'low held':>9} {'up 1y':>6}")
+    for depth, rung in sorted(plan.ladder_stats(full).items()):
+        print(f"  {depth:>6.0%} {na(rung.filled, lambda x: f'{x:.0%}'):>7} {na(rung.held, lambda x: f'{x:.0%}'):>9} "
+              f"{na(rung.higher_365, lambda x: f'{x:.0%}'):>6}")
+    return 0
+
+
 def cmd_price(args, ctx: Ctx) -> int:
     print(f"{_provider(args, ctx).spot():.2f}")
     return 0
@@ -1479,6 +1534,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--qty", type=float, help="ETH actually bought (default: the most the floor allows)")
     sp.add_argument("--force", action="store_true", help="record a size beyond the floor anyway")
     sp.add_argument("--note")
+
+    sp = add("context", cmd_context, "the dashboard's market panels: trend, crowding, signal odds, order fill rates, floor risk")
+    sp.add_argument("--floor", type=float, help="also show the risk of reaching this price (keep it out of public logs)")
 
     sp = add("sync", cmd_sync, "download daily candles into the local cache (later runs fetch only the gap)")
     sp.add_argument("--days", type=int, default=3000)

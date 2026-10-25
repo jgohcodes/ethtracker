@@ -20,6 +20,7 @@ State lives in `~/.ethtracker` (override with `ETHTRACKER_HOME`): `config.toml` 
 | `headroom` | How much more you can add and still survive the stress move, from current equity and holdings. See [The stress rule](#the-stress-rule) |
 | `size` | Sizes a trade from its stop and your remaining headroom, tests it against your rules, prints price scenarios and history (plus a leverage ladder under isolated margin). **Exit code 1 if blocked** |
 | `plan` | Sets or shows the adding plan: a liquidation floor (`--floor`) and a weekly add (`--weekly`). See [The adding plan](#the-adding-plan) |
+| `context` | The dashboard's market panels in the terminal: trend, leverage crowding, each pullback signal's record, buy-order fill rates, and the odds of reaching floors 30-60% under the price (or `--floor <USD>`) |
 | `add` | Records new cash and the ETH it bought, sized so the whole book's liquidation price stays at or under the floor; refuses a bigger size unless `--force` |
 | `open` / `close` | Record a position you took / closed. `open` refuses rule-breaking plans unless `--force` (which is written into the note) |
 | `risk` | Marks open positions to market: PnL, liquidation distance, stop distance, funding accrued, time held, portfolio open risk and drawdown. **Exit code 1 if any flag is raised** |
