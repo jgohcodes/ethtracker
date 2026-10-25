@@ -273,6 +273,27 @@ def test_a_malformed_state_payload_is_an_error_not_a_crash(monkeypatch):
         snapshot.get_state("https://d.example", "t", "derivs")
 
 
+def test_a_login_page_instead_of_the_api_is_named_without_leaking_the_address(monkeypatch):
+    class LoginPage:
+        status_code, ok = 200, True
+        headers = {"content-type": "text/html; charset=utf-8"}
+        url = "https://vercel.com/login?next=%2Fsso-api"
+        history = ["302"]
+        text = "<html><head><title>\n  Login – Vercel </title></head><body>secret-ish body</body></html>"
+
+        @staticmethod
+        def json():
+            raise ValueError("not JSON")
+
+    monkeypatch.setattr(snapshot.requests, "get", lambda *a, **k: LoginPage())
+    with pytest.raises(data.DataError) as excinfo:
+        snapshot.get_state("https://d.example", "t", "journal")
+    message = str(excinfo.value)
+    assert "HTTP 200, text/html, redirected to vercel.com, a web page titled 'Login – Vercel'" in message
+    assert "production address" in message
+    assert "d.example" not in message and "body" not in message
+
+
 def test_tail_csv_keeps_the_header_and_the_newest_rows():
     text = "time,oi\n" + "".join(f"2026-01-{d:02d},{d}\n" for d in range(1, 11))
     assert snapshot.tail_csv(text, 3) == "time,oi\n2026-01-08,8\n2026-01-09,9\n2026-01-10,10\n"

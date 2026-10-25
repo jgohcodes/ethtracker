@@ -16,6 +16,7 @@ repository. The snapshot contains your equity and positions, so treat the dashbo
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -262,6 +263,26 @@ def publish(endpoint: str, token: str, snap: dict) -> None:
         raise DataError(f"dashboard refused the snapshot ({response.status_code}): {response.text[:200]!r}")
 
 
+WRONG_ADDRESS = ("check that ETHTRACKER_DASHBOARD_URL is the site's production address (the domain listed under "
+                 "Domains on the Vercel project page), not a deployment link or a vercel.com page")
+
+
+def _what_came_back(response, url: str) -> str:
+    """Status, content type, a redirect off the dashboard's host and a web page's title: enough to tell a login page
+    or a wrong address from the API. Never the body, which can hold the journal, so it is safe for public logs."""
+    headers = getattr(response, "headers", None) or {}
+    kind = (headers.get("content-type") or "").split(";")[0].strip() or "no content type"
+    parts = [f"HTTP {response.status_code}", kind]
+    final = getattr(response, "url", None)
+    if getattr(response, "history", None) and final:
+        host = urlparse(final).hostname
+        parts.append("redirected on the same host" if host == urlparse(url).hostname else f"redirected to {host}")
+    if "html" in kind:
+        title = re.search(r"<title[^>]*>(.*?)</title>", (response.text or "")[:20000], re.I | re.S)
+        parts.append(f"a web page titled {' '.join(title.group(1).split())[:80]!r}" if title else "a web page")
+    return ", ".join(parts)
+
+
 def get_state(base: str, token: str, name: str) -> str | None:
     """The stored ``journal`` or ``derivs`` text, or None if nothing has been stored yet."""
     url = state_endpoint(base, name)
@@ -275,10 +296,10 @@ def get_state(base: str, token: str, name: str) -> str | None:
         raise DataError(f"dashboard refused to return {name} ({response.status_code}): {response.text[:200]!r}")
     try:
         content = response.json()["content"]
-    except (ValueError, KeyError, TypeError) as exc:
-        raise DataError(f"unexpected {name} payload from the dashboard") from exc
+    except (ValueError, KeyError, TypeError):
+        content = None
     if not isinstance(content, str):
-        raise DataError(f"unexpected {name} payload from the dashboard")
+        raise DataError(f"unexpected {name} payload from the dashboard ({_what_came_back(response, url)}): {WRONG_ADDRESS}")
     return content
 
 
