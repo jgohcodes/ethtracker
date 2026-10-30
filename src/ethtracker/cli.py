@@ -451,6 +451,25 @@ def _fear_greed(index: pd.DatetimeIndex) -> pd.Series | None:
         return None
 
 
+def _fear_greed_overlap(fg, step, fine, fwd, index, era) -> None:
+    """Does Fear & Greed add anything the score does not already carry? Its correlation with the score, the IC of
+    what is left of it once the score is taken out, and the score's IC with it added at a fifth of the weight."""
+    both = fg.notna() & fine.notna() & fwd["ret"].notna()
+    rf, rs = fg[both].rank(pct=True), fine[both].rank(pct=True)
+    beta = np.cov(rf, rs)[0, 1] / np.var(rs, ddof=1)
+    residual = rf - beta * rs
+    added = (step + 0.2 * (fg - 50) / 50) / 1.2
+    print(f"  Fear & Greed against the score: correlation {score.rank_ic(fg[both], step[both]):+.2f} with the step score, "
+          f"{score.rank_ic(fg[both], fine[both]):+.2f} with the continuous one")
+    for name, s in (("Fear & Greed with the score taken out", residual), ("step score + Fear & Greed at 20%", added),
+                    ("step score alone (same days)", step)):
+        ics = []
+        for _, start, end in SCORE_ERAS:
+            m = era(index, start, end) & both & s.reindex(index).notna()
+            ics.append(score.rank_ic(s.reindex(index)[m], fwd.loc[m, "ret"]) if m.sum() > 30 else float("nan"))
+        print(f"  {name:<40} " + "  ".join(f"{e}: {ic:+.2f}" for (e, *_), ic in zip(SCORE_ERAS, ics)))
+
+
 def _setups(full: pd.DataFrame) -> dict[str, pd.Series]:
     """Entry setups traders cite, as days they fire, each from data up to that day's close only."""
     close = full["close"]
@@ -550,6 +569,7 @@ def cmd_score_study(args, ctx: Ctx) -> int:
             ics.append(score.rank_ic(fg[m], fwd.loc[m, "ret"]) if m.sum() > 30 else float("nan"))
         print(f"  {'Fear & Greed (raw)':<22} " + "  ".join(f"{e}: {ic:+.2f}" for (e, *_), ic in zip(SCORE_ERAS, ics))
               + "  (negative = contrarian: fear before gains)")
+        _fear_greed_overlap(fg, step, fine, fwd, full.index, era)
     both = step.notna() & fine.notna()
     print(f"  correlation between the two: {score.rank_ic(step[both], fine[both]):+.2f}")
 
@@ -788,6 +808,8 @@ LEVEL_LABELS = [
     ("sma_20", "20d"), ("sma_50", "50d"), ("sma_100", "100d"), ("sma_200", "200d"),
     ("avwap_low", "AVWAP from the low"), ("avwap_year", "AVWAP from the year open"),
     ("val", "value-area low"), ("poc", "point of control"), ("vah", "value-area high"),
+    ("swing_lo_2", "swing low"), ("swing_lo_1", "swing low"), ("swing_hi_1", "swing high"), ("swing_hi_2", "swing high"),
+    ("s2_m", "monthly S2"), ("s1_m", "monthly S1"), ("piv_m", "monthly pivot"), ("r1_m", "monthly R1"), ("r2_m", "monthly R2"),
 ]
 
 

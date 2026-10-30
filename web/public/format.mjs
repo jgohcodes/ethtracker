@@ -203,6 +203,9 @@ export const MARKET_LEVELS = [
   ["sma_20", "20d average"], ["sma_50", "50d average"], ["sma_100", "100d average"], ["sma_200", "200d average"],
   ["avwap_low", "AVWAP from the low"], ["avwap_year", "AVWAP from the year open"],
   ["val", "Value-area low"], ["poc", "Point of control"], ["vah", "Value-area high"],
+  ["swing_hi_2", "Swing high (resistance)"], ["swing_hi_1", "Swing high (resistance)"],
+  ["swing_lo_1", "Swing low (support)"], ["swing_lo_2", "Swing low (support)"],
+  ["r2_m", "Monthly R2"], ["r1_m", "Monthly R1"], ["piv_m", "Monthly pivot"], ["s1_m", "Monthly S1"], ["s2_m", "Monthly S2"],
 ];
 
 // One list, highest price first, mixing market levels, the mark and each position's own levels,

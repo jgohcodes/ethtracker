@@ -163,6 +163,10 @@ def _technical(cfg: Config, df: pd.DataFrame, anchor: pd.Timestamp | None, signa
     n = len(df)
     sma = {w: _f(indicators.sma(close, w).iloc[-1]) for w in indicators.SMA_WINDOWS}
     levels.update({f"sma_{w}": v for w, v in sma.items() if v is not None})
+    piv = indicators.monthly_pivots(df)
+    if piv:
+        levels.update(piv)
+    levels.update(indicators.nearest_swings(df, price))
 
     if sma[20] is not None and sma[50] is not None:
         if price > sma[50] and sma[20] > sma[50]:

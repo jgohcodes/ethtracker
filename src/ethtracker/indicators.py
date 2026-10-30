@@ -58,6 +58,53 @@ def adverse_excursions(df: pd.DataFrame, side: str, horizon: int) -> np.ndarray:
 
 
 SMA_WINDOWS = (20, 50, 100, 200)
+SWING_SR = 0.15  # a swing high or low counts once price has moved this far away from it
+SWING_YEARS = 2
+
+
+def monthly_pivots(df: pd.DataFrame) -> dict[str, float] | None:
+    """Classic floor-trader pivots from the last completed calendar month's high, low and close:
+    P = (H + L + C) / 3, R1 = 2P - L, S1 = 2P - H, R2 = P + (H - L), S2 = P - (H - L). Fixed for the month."""
+    month = df.index[-1].to_period("M") if df.index.tz is None else df.index[-1].tz_localize(None).to_period("M")
+    stamp = df.index.tz_localize(None) if df.index.tz is not None else df.index
+    prev = df[stamp.to_period("M") == month - 1]
+    if prev.empty:
+        return None
+    h, l, c = float(prev["high"].max()), float(prev["low"].min()), float(prev["close"].iloc[-1])
+    p = (h + l + c) / 3
+    return {"piv_m": p, "r1_m": 2 * p - l, "s1_m": 2 * p - h, "r2_m": p + (h - l), "s2_m": p - (h - l)}
+
+
+def swing_levels(df: pd.DataFrame, swing: float = SWING_SR, years: int = SWING_YEARS) -> list[tuple[pd.Timestamp, str, float]]:
+    """Confirmed swing highs and lows on daily highs and lows: a high counts once the low has since fallen ``swing``
+    below it, a low once the high has since risen ``swing`` above it. Only the last ``years`` years; each was
+    already confirmed by the latest candle, so nothing is drawn from the future."""
+    out, direction = [], 0
+    hi_t = lo_t = df.index[0]
+    hi, lo = float(df["high"].iloc[0]), float(df["low"].iloc[0])
+    for t, h, l in zip(df.index, df["high"].to_numpy(float), df["low"].to_numpy(float)):
+        if direction >= 0 and h > hi:
+            hi, hi_t = h, t
+        if direction <= 0 and l < lo:
+            lo, lo_t = l, t
+        if direction >= 0 and l <= hi * (1 - swing):
+            out.append((hi_t, "high", hi))
+            direction, lo, lo_t = -1, l, t
+        elif direction <= 0 and h >= lo * (1 + swing):
+            out.append((lo_t, "low", lo))
+            direction, hi, hi_t = 1, h, t
+    since = df.index[-1] - pd.DateOffset(years=years)
+    return [x for x in out if x[0] >= since and x[0] != df.index[0]]
+
+
+def nearest_swings(df: pd.DataFrame, price: float, n: int = 2) -> dict[str, float]:
+    """The ``n`` nearest swing highs above ``price`` (resistance) and swing lows below it (support)."""
+    pts = swing_levels(df)
+    above = sorted({p for _, _, p in pts if p > price})[:n]
+    below = sorted({p for _, _, p in pts if p < price}, reverse=True)[:n]
+    out = {f"swing_hi_{i + 1}": p for i, p in enumerate(above)}
+    out.update({f"swing_lo_{i + 1}": p for i, p in enumerate(below)})
+    return out
 
 
 def frame(df: pd.DataFrame) -> pd.DataFrame:

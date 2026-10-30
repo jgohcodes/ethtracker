@@ -259,3 +259,26 @@ def test_flagged_days_are_a_small_share_of_the_sample():
     df = synthetic_candles(500)
     buckets = {b.label: b for b in signals.warning_study(CFG, df, 14)}
     assert buckets["2+ flags"].n < buckets["all days"].n / 10
+
+
+def test_monthly_pivots_come_from_last_months_high_low_and_close_and_do_not_move_within_the_month():
+    import pandas as pd
+    from ethtracker import indicators
+    idx = pd.date_range("2026-09-01", "2026-10-20", freq="D", tz="UTC")
+    df = pd.DataFrame({"open": 100.0, "high": 110.0, "low": 90.0, "close": 100.0, "volume": 1.0}, index=idx)
+    df.loc["2026-09-30", "close"] = 105.0
+    df.loc["2026-10-10":, ["high", "low", "close"]] = [300.0, 200.0, 250.0]  # October moves, the pivots do not
+    piv = indicators.monthly_pivots(df)
+    p = (110 + 90 + 105) / 3
+    assert piv == {"piv_m": p, "r1_m": 2 * p - 90, "s1_m": 2 * p - 110, "r2_m": p + 20, "s2_m": p - 20}
+    assert indicators.monthly_pivots(df.iloc[:-5]) == piv
+
+
+def test_swing_levels_are_real_turning_points_confirmed_by_a_move_away():
+    import pandas as pd
+    from ethtracker import indicators
+    path = [100, 120, 140, 130, 115, 110, 125, 135, 129, 128]  # high 140 confirmed (fell 15%+), low 110 confirmed (rose 15%+)
+    idx = pd.date_range("2026-01-01", periods=len(path), freq="D", tz="UTC")
+    df = pd.DataFrame({"open": path, "high": path, "low": path, "close": path, "volume": 1.0}, index=idx, dtype=float)
+    assert [(k, p) for _, k, p in indicators.swing_levels(df)] == [("high", 140.0), ("low", 110.0)]
+    assert indicators.nearest_swings(df, 128.0) == {"swing_hi_1": 140.0, "swing_lo_1": 110.0}
