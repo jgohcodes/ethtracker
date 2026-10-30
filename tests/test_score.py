@@ -111,10 +111,16 @@ def test_score_study_command(capsys, tmp_path, monkeypatch):
     monkeypatch.setattr(derivs, "fetch_funding_history",
                         lambda start, end, **kw: (pd.Series(0.0001, index=pd.date_range(start, end, freq="D", tz="UTC")), 0))
     monkeypatch.setattr(score, "chance_ic", lambda *a, **k: 0.08)
+
+    class FG:
+        def json(self):
+            return {"data": [{"timestamp": str(int(t.timestamp())), "value": str(10 + i % 85)} for i, t in enumerate(df.index)]}
+    monkeypatch.setattr("ethtracker.cli.requests.get", lambda *a, **k: FG())
     code, text = run(capsys, "--provider", "csv", "--csv", tmp_path / "eth.csv", "score-study")
     assert code == 0
     for heading in ("Each part against ETH's next 30 days", "Chance alone", "literature weights (the score)",
-                    "What followed each score bucket", "Today: score"):
+                    "What followed each score bucket", "Today: score", "Entry setups", "50d rising, RSI <= 40",
+                    "Bullish RSI divergence", "Fear & Greed <= 25 (extreme fear)", "Fear & Greed (raw)"):
         assert heading in text, heading
 
 

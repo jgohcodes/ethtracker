@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 
 from . import advice, alerts, coinbase, combo, config, cycles, decisions, derivs, dipbuy, indicators, observed, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
@@ -435,6 +436,21 @@ def _candidate_states(cfg, full: pd.DataFrame) -> pd.DataFrame:
 SCORE_ERAS = (("all", None, None), ("to 2020", None, "2021-01-01"), ("2021 on", "2021-01-01", None))
 
 
+FEAR_GREED_URL = "https://api.alternative.me/fng/"
+
+
+def _fear_greed(index: pd.DatetimeIndex) -> pd.Series | None:
+    """Alternative.me's crypto Fear & Greed Index (0 extreme fear .. 100 extreme greed), daily from Feb 2018."""
+    try:
+        r = requests.get(FEAR_GREED_URL, params={"limit": 0, "format": "json"}, timeout=30)
+        rows = r.json()["data"]
+        fg = pd.Series({pd.Timestamp(int(x["timestamp"]), unit="s", tz="UTC").normalize(): float(x["value"]) for x in rows})
+        return fg.sort_index().reindex(index)
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        print(f"warning: Fear & Greed history unavailable ({exc.__class__.__name__})", file=sys.stderr)
+        return None
+
+
 def _setups(full: pd.DataFrame) -> dict[str, pd.Series]:
     """Entry setups traders cite, as days they fire, each from data up to that day's close only."""
     close = full["close"]
@@ -456,6 +472,11 @@ def _setups(full: pd.DataFrame) -> dict[str, pd.Series]:
         "Bullish RSI divergence": divergence,
         "Divergence, then close > 10d avg": recent_div & (close > s10) & ~(close.shift(1) > s10.shift(1)),
     }
+
+
+def _fear_greed_setups(fg: pd.Series) -> dict[str, pd.Series]:
+    return {"Fear & Greed <= 25 (extreme fear)": fg <= 25, "Fear & Greed 26-74": (fg > 25) & (fg < 75),
+            "Fear & Greed >= 75 (extreme greed)": fg >= 75}
 
 
 def cmd_score_study(args, ctx: Ctx) -> int:
@@ -508,6 +529,7 @@ def cmd_score_study(args, ctx: Ctx) -> int:
             ics.append(score.rank_ic(sc[m], fwd.loc[m, "ret"]))
         print(f"  {name:<34} " + "  ".join(f"{e}: {ic:+.2f}" for (e, *_), ic in zip(SCORE_ERAS, ics)))
 
+    fg = _fear_greed(full.index)
     fine = score.combine(score.continuous(full, funding8h))
     step = score.combine(st)
     print()
@@ -521,13 +543,24 @@ def cmd_score_study(args, ctx: Ctx) -> int:
         moves = s.diff().abs()
         print(f"  {name:<22} " + "  ".join(f"{e}: {ic:+.2f}" for (e, *_), ic in zip(SCORE_ERAS, ics))
               + f"  | days it moved: {(moves > 1e-9).mean():.0%}, sign flips a year: {flips:.0f}")
+    if fg is not None:
+        ics = []
+        for _, start, end in SCORE_ERAS:
+            m = era(full.index, start, end) & fg.notna() & fwd["ret"].notna()
+            ics.append(score.rank_ic(fg[m], fwd.loc[m, "ret"]) if m.sum() > 30 else float("nan"))
+        print(f"  {'Fear & Greed (raw)':<22} " + "  ".join(f"{e}: {ic:+.2f}" for (e, *_), ic in zip(SCORE_ERAS, ics))
+              + "  (negative = contrarian: fear before gains)")
     both = step.notna() & fine.notna()
     print(f"  correlation between the two: {score.rank_ic(step[both], fine[both]):+.2f}")
 
     print()
     print(f"Entry setups: what followed the days each fired, {args.horizon} days on (higher / median / fell 10%+ within)")
     print(f"  {'setup':<36} " + " ".join(f"{e:>30}" for e, *_ in SCORE_ERAS))
-    for name, fired in _setups(full).items():
+    setups = _setups(full)
+    if fg is not None:
+        setups.update(_fear_greed_setups(fg))
+        setups["Every day with a Fear & Greed reading"] = fg.notna()
+    for name, fired in setups.items():
         cells = []
         for _, start, end in SCORE_ERAS:
             m = era(full.index, start, end) & fired.fillna(False) & fwd["ret"].notna()
