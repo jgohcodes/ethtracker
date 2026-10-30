@@ -490,7 +490,23 @@ def _setups(full: pd.DataFrame) -> dict[str, pd.Series]:
         "50d falling, RSI <= 30": falling & (rsi <= 30),
         "Bullish RSI divergence": divergence,
         "Divergence, then close > 10d avg": recent_div & (close > s10) & ~(close.shift(1) > s10.shift(1)),
+        **_hammers(full),
     }
+
+
+def _hammers(full: pd.DataFrame) -> dict[str, pd.Series]:
+    """Long lower wicks after a fall: the low reaches at least 1 ATR under the previous close, the lower wick is at
+    least 60% of the day's range and twice the body, and price is 15%+ under its 30-day high."""
+    o, h, l, c = (full[k] for k in ("open", "high", "low", "close"))
+    rng = (h - l).replace(0, np.nan)
+    lower = np.minimum(o, c) - l
+    body = (c - o).abs()
+    atr = indicators.atr(full).shift(1)
+    pullback = c <= h.rolling(30).max() * 0.85
+    shape = (lower >= 0.6 * rng) & (lower >= 2 * body)
+    deep = l <= c.shift(1) - atr
+    return {"Hammer: long lower wick after a fall": shape & deep & pullback,
+            "Hammer, then a higher close next day": (shape & deep & pullback).shift(1, fill_value=False) & (c > c.shift(1))}
 
 
 def _fear_greed_setups(fg: pd.Series) -> dict[str, pd.Series]:
