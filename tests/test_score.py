@@ -204,7 +204,7 @@ def test_a_trade_sees_the_score_and_signals_of_the_close_before_its_day_and_noth
     at = (day + pd.Timedelta(hours=17)).isoformat()
     (then, missing) = score.at_times(CFG, df, None, None, [at, None])
     assert missing is None and then["basis_close"] == f"{df.index[399]:%Y-%m-%d}"
-    assert then["score"] == pytest.approx(score.combine(score.states(CFG, df)).iloc[399])
+    assert then["score"] == pytest.approx(score.combine(score.continuous(df)).iloc[399])
     assert then["label"] == score.label(then["score"])
     assert [c["key"] for c in then["components"]] == [c.key for c in score.COMPONENTS]
     assert not {g["name"] for g in then["firing"]} & score.SCORED_ELSEWHERE
@@ -228,7 +228,7 @@ def test_the_snapshot_gives_each_open_exchange_trade_its_signals_and_the_positio
     assert earlier["signals"] is None and a["signals"]["basis_close"] == f"{df.index[299]:%Y-%m-%d}"
     assert p["entry_score"] == pytest.approx((a["signals"]["score"] * 1 + b["signals"]["score"] * 2) / 3)
     assert "signals" not in account["positions"][0]["trades"][0]  # the input is left as it was
-    assert {"date", "score", "close", "fine"} <= set(snap["score"]["history"][-1]) and snap["score"]["history"][-1]["close"] == pytest.approx(float(df["close"].iloc[-1]), abs=0.01)
+    assert {"date", "score", "close"} <= set(snap["score"]["history"][-1]) and snap["score"]["history"][-1]["close"] == pytest.approx(float(df["close"].iloc[-1]), abs=0.01)
 
 
 def test_the_continuous_parts_keep_the_steps_signs_and_move_inside_a_state():
@@ -244,8 +244,22 @@ def test_the_continuous_parts_keep_the_steps_signs_and_move_inside_a_state():
     assert (fine.diff()[held].abs() > 1e-9).mean() > 0.9  # it moves on days the step score does not
 
 
-def test_the_block_carries_the_continuous_score():
+def test_the_block_shows_the_continuous_score_and_keeps_the_step_one():
     df = synthetic_candles(900, seed=6)
     b = score.block(CFG, df, pd.Series(0.0001, index=df.index), df, None)
-    assert -1 <= b["fine"] <= 1 and b["history"][-1]["fine"] == pytest.approx(b["fine"], abs=1e-4)
-    assert set(b["fine_ago"]) == {"3", "7", "14"}
+    funding = pd.Series(0.0001, index=df.index)
+    assert b["value"] == pytest.approx(score.combine(score.continuous(df, funding)).iloc[-1])
+    assert b["step"] == pytest.approx(score.combine(score.states(CFG, df, funding)).iloc[-1])
+
+
+def test_trading_the_crossings_buys_on_the_way_up_and_sells_on_the_way_down():
+    idx = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
+    close = pd.Series([100.0, 100.0, 110.0, 120.0, 90.0, 80.0], index=idx)
+    sc = pd.Series([-0.5, 0.3, 0.4, -0.2, -0.3, -0.4], index=idx)
+    r = score.cross_strategy(close, sc, fee=0.0)
+    assert r.buys == 1 and r.multiple == pytest.approx(1.2)  # bought at 100, sold at 120
+    half = score.cross_strategy(close, sc, sell=0.5, fee=0.0)
+    assert half.multiple == pytest.approx(0.6 + 0.5 * 0.8)  # half sold at 120, half still held at 80
+    tp = score.cross_strategy(close, sc, take_profit=0.1, fee=0.0)
+    assert tp.multiple == pytest.approx(1.1)  # out at 110
+    assert score.hold(close).multiple == pytest.approx(0.8)

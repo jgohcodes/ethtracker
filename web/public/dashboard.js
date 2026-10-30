@@ -430,7 +430,7 @@ function renderAccount(s) {
       ? (liq > floor * 1.001 ? badge("critical", "✕", "Above your floor") : badge("good", "✓", "At or under your floor")) : null;
     const gap = finite(liq) && finite(estimate) && estimate > 0 ? liq - estimate : null;
     return h("div", { class: "group" },
-      h("div", { class: "lead" }, h("h3", { text: `${p.product ?? "ETH perpetual"}: ${p.side} ${fixed(Math.abs(p.size ?? NaN), 4)} ETH` }), vsFloor),
+      h("div", { class: "lead" }, h("h3", { text: `${p.product ?? "ETH perpetual"}: ${p.side} ${fixed(Math.abs(p.size ?? NaN), 2)} ETH` }), vsFloor),
       h("div", { class: "metrics" },
         metric("Entry (average)", usd(p.entry)),
         metric("Mark", usd(p.mark)),
@@ -443,17 +443,10 @@ function renderAccount(s) {
         finite(p.entry_score) ? metric("Signal score at entry", scoreValue(p.entry_score)) : null),
       openTrades(p, finite(p.mark) ? p.mark : s.price, s, numbered));
   });
-  const sm = a.summary;
-  const summary = sm ? h("div", { class: "metrics" },
-    sm.collateral === null || sm.collateral === undefined ? null : metric("Collateral", usd(sm.collateral)),
-    sm.liquidation_buffer === null || sm.liquidation_buffer === undefined ? null : metric("Liquidation buffer", usd(sm.liquidation_buffer)),
-    sm.unrealized === null || sm.unrealized === undefined ? null : metric("Open PnL, all", delta(sm.unrealized, signedUsd(sm.unrealized)))) : null;
   fill($("account"),
     positions.length ? positions : h("p", { class: "muted", text:
       "Coinbase's API returned no ETH perpetual position. If you hold one, it may sit on the Deribit-powered venue this key cannot see yet." }),
-    summary,
-    h("p", { class: "note", text: `Read from Coinbase with your view-only key at ${when}. These are the exchange's own numbers; ` +
-      "where they differ from this tool's, trust these and tell me the gap so the plan's margin rate can be corrected." }));
+    h("p", { class: "note", text: `Read from Coinbase at ${when}.` }));
 }
 
 // A score with its label, as the score card shows it.
@@ -516,12 +509,11 @@ function openTrades(p, price, s, numbered) {
       h("td", { class: "trade__when", text: tradeWhen(t),
         title: t.first_seen ? "Already held when tracking began: its real start may be earlier"
           : t.seen_at && t.after ? "Made between these two runs of the job" : "" }),
-      h("td", { class: "num", text: fixed(Math.abs(t.size), 4) }),
-      h("td", { class: "num", text: finite(t.price) ? usd(t.price) : "n/a" }),
+      h("td", { class: "num", text: fixed(Math.abs(t.size), 2) }),
+      h("td", { class: "num", text: finite(t.price) ? usd(t.price, 0) : "n/a" }),
       h("td", { class: "num" }, since === null ? "n/a" : delta(since, signedPct(since))),
       h("td", { class: "num" }, pnl === null ? "n/a" : delta(pnl, signedUsd(pnl))),
-      h("td", {}, then && finite(then.score) ? scoreValue(then.score) : "n/a",
-        then ? h("div", { class: "sub-line muted", text: `${then.basis_close} close` }) : null),
+      h("td", { title: then ? `On the ${then.basis_close} close` : "" }, then && finite(then.score) ? scoreValue(then.score) : "n/a"),
       PARTS.map((k) => partCell(states[k])),
       firingCell(then?.firing ?? []));
   });
@@ -529,9 +521,9 @@ function openTrades(p, price, s, numbered) {
   const nowStates = Object.fromEntries((sc?.components ?? []).map((c) => [c.key, c.state]));
   const nowFiring = (sc?.unscored ?? []).filter((u) => u.state || u.risk).map((u) => ({ name: u.name, bias: u.state ?? 0, risk: u.risk, headline: u.headline }));
   const now = sc && finite(sc.value) ? h("tr", { class: "trades__now" },
-    h("td", {}), h("td", { text: "Now" }), h("td", {}), h("td", { class: "num", text: usd(price) }), h("td", {}),
+    h("td", {}), h("td", { text: "Now" }), h("td", {}), h("td", { class: "num", text: usd(price, 0) }), h("td", {}),
     h("td", { class: "num" }, finite(p.pnl_since_entry) ? delta(p.pnl_since_entry, signedUsd(p.pnl_since_entry)) : ""),
-    h("td", {}, scoreValue(sc.value), h("div", { class: "sub-line muted", text: `${s.close_date} close` })),
+    h("td", {}, scoreValue(sc.value)),
     PARTS.map((k) => partCell(nowStates[k])), firingCell(nowFiring)) : null;
   const head = h("thead", {}, h("tr", {},
     h("th", { class: "num", text: "#" }), h("th", { text: "Opened" }), h("th", { class: "num", text: "ETH open" }),
@@ -541,18 +533,7 @@ function openTrades(p, price, s, numbered) {
     h("th", { text: "Other signals firing" })));
   return h("div", { class: "trades" },
     h("h3", { class: "sub", text: trades.length === 1 ? "The open trade, and the signals now" : `The ${trades.length} open trades, oldest first, and the signals now` }),
-    h("div", { class: "scroll" }, h("table", { class: "tbl trades-table", "data-trades": "" }, head, h("tbody", {}, rows, now))),
-    h("p", { class: "note", text: "Hover a row, or its numbered marker on the signal score chart, to pick it out in both. " +
-      "Columns: momentum, trend, 200-day trend and volume pressure (the scored parts), then the unscored signals that were firing; hover a chip for its reading." }),
-    p.trades_complete === false ? h("p", { class: "note", text:
-      "The trades read do not reach back to when this position was opened; the first row is the part opened before them." }) : null,
-    p.trades_source === "filled orders" ? h("p", { class: "note", text:
-      "Read from your filled orders: Coinbase's fills list does not include this market." }) : null,
-    p.trades_source === "observed" ? h("p", { class: "note", text:
-      `Coinbase's API gives no trade history for ${p.product ?? "this market"}, so each trade here is worked out from your ` +
-      "position between the job's hourly runs: dated by the two runs it fell between and priced from the change in Coinbase's " +
-      "average entry. Its signals are those of the close before the earlier run. A position already held when this " +
-      "tracking began counts as one trade, with the signals of the close before that first run." }) : null);
+    h("div", { class: "scroll" }, h("table", { class: "tbl trades-table", "data-trades": "" }, head, h("tbody", {}, rows, now))));
 }
 
 // ---- the signal score -----------------------------------------------------------------------------
@@ -566,7 +547,7 @@ function svg(tag, attrs = {}, ...children) {
 }
 
 const SIGNAL_NAMES = {
-  rsi: "RSI (14 days)", rsi_rollover: "RSI rolling over", extension: "Stretch from the 20-day average",
+  rsi: "RSI (14 days)", hammer: "Hammer (long lower wick)", rsi_rollover: "RSI rolling over", extension: "Stretch from the 20-day average",
   volatility: "Volatility (risk only)", avwap_low: "AVWAP from the 365-day low", avwap_year: "AVWAP from the year open",
   poc: "Volume profile (365 days)", funding: "Funding level", oi_change: "Open interest, 24 hours",
   oi_level: "Open interest level", long_liquidations: "Long liquidations", short_liquidations: "Short liquidations",
@@ -708,8 +689,7 @@ function scorePriceChart(history, trades = []) {
   });
   const line = days.map((d, i) => (finite(d.close) ? `${x(i).toFixed(1)},${yp(d.close).toFixed(1)}` : null)).filter(Boolean).join(" ");
   const hits = days.map((d, i) => svg("rect", { x: (L + i * step).toFixed(2), y: T, width: step.toFixed(2), height: ph, class: "sp__hit" },
-    svg("title", {}, document.createTextNode(`${d.date}: score ${signedFixed(d.score)}` +
-      (finite(d.fine) ? ` (continuous ${signedFixed(d.fine)})` : "") + `, ETH ${usd(d.close, 0)}`))));
+    svg("title", {}, document.createTextNode(`${d.date}: score ${signedFixed(d.score)}, ETH ${usd(d.close, 0)}`))));
   const text = (attrs, t) => svg("text", attrs, document.createTextNode(t));
   const ticks = [0, Math.floor((n - 1) / 2), n - 1].map((i, k) =>
     text({ x: x(i).toFixed(1), y: H - 5, "text-anchor": k === 0 ? "start" : k === 2 ? "end" : "middle", class: "sp__axis" }, shortDate(days[i].date)));
@@ -722,7 +702,6 @@ function scorePriceChart(history, trades = []) {
   [[1, "+1"], [0, "0"], [-1, "−1"]].map(([v, t]) => text({ x: L - 6, y: (ys(v) + 3.5).toFixed(1), "text-anchor": "end", class: "sp__axis" }, t)),
   bars,
   svg("polyline", { points: line, class: "sp__price" }),
-  fineLine(days, x, ys),
   finite(last.close) ? svg("circle", { cx: x(n - 1).toFixed(1), cy: yp(last.close).toFixed(1), r: 3.2, class: "sp__now" }) : null,
   priceLabels(closes, last.close, yp, L + pw + 6, T + 9, T + ph).map(([y, t, now]) =>
     text({ x: L + pw + 6, y: y.toFixed(1), class: now ? "sp__axis sp__axis--now" : "sp__axis" }, t)),
@@ -757,12 +736,6 @@ function tradeMarkers(trades, days, x, right, top, height, step) {
   });
 }
 
-// The continuous score on the bars' axis: it moves every day, so a slide inside a step shows.
-function fineLine(days, x, ys) {
-  const pts = days.map((d, i) => (finite(d.fine) ? `${x(i).toFixed(1)},${ys(d.fine).toFixed(1)}` : null)).filter(Boolean);
-  return pts.length > 1 ? svg("polyline", { points: pts.join(" "), class: "sp__fine" }) : null;
-}
-
 // The right axis: the period's high and low, and today's close beside its point; a high or low label that
 // would sit on top of today's is dropped.
 function priceLabels(closes, now, yp, x, top, bottom) {
@@ -784,8 +757,7 @@ function scoreChartBlock(history, trades = []) {
       h("div", { class: "sp-head" },
         h("div", { class: "sp-key" },
           h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__bars", "aria-hidden": "true" }), "Signal score (left axis)"),
-          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__line", "aria-hidden": "true" }), "ETH daily close (right axis)"),
-          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__fine", "aria-hidden": "true" }), "Continuous score (left axis)")),
+          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__line", "aria-hidden": "true" }), "ETH daily close (right axis)")),
         h("div", { class: "seg", role: "group", "aria-label": "Chart range" }, buttons)),
       scorePriceChart(history, trades));
   };
@@ -811,9 +783,6 @@ function renderScore(s) {
     .map(([k, t]) => h("span", { class: "ago" }, h("span", { class: "muted", text: `${t} ` }), signedFixed(sc.ago[k])));
   const lead = h("div", { class: "score__lead" },
     h("div", { class: "score__value" }, h("span", { class: "score__number", text: signedFixed(sc.value) }), badge(info.tone, info.icon, info.label, true)),
-    finite(sc.fine) ? h("div", { class: "score__fine" },
-      h("span", { class: "muted", text: "Continuous " }), h("strong", { text: signedFixed(sc.fine) }),
-      h("span", { class: "muted", text: ` · 3 days ago ${signedFixed(sc.fine_ago?.["3"])}, 7 days ${signedFixed(sc.fine_ago?.["7"])}, 14 days ${signedFixed(sc.fine_ago?.["14"])}` })) : null,
     h("div", { class: "score__ago" }, ago));
   // the institutional era leads; the full history follows, because the large early swings skew its averages
   const recentLine = cal?.same_recent?.days
@@ -861,7 +830,7 @@ function renderScore(s) {
         h("tr", {}, h("td", { colSpan: 5, class: "score__group", text: "Shown, not scored: no published evidence of a directional edge" })), others) : null)),
     h("details", { class: "more score__how" }, h("summary", { text: "How the score is built" }),
       h("p", { class: "note", text:
-        "Each scored signal reads +1, 0 or −1 every day; the score is their weighted average, from −1 to +1 (a part with no data, such as funding before its history starts, drops out and the rest are rescaled). " +
+        "Each scored part is read on a sliding scale from −1 to +1 (its reading divided by how far ETH normally moves over that horizon, then squashed), so the score moves every day instead of in steps; the score is their weighted average (a part with no data drops out and the rest are rescaled). It points the same way as the older step version and tested the same on ETH's history. " +
         "The weights were set from the research before looking at ETH's results: three readings of momentum and trend, the one effect with repeated out-of-sample support in crypto, carry 86%; volume pressure, a plausible mechanism with no published test, carries 14%. " +
         "Then the check on ETH's history, 2016 to 2026: every scored part pointed the right way in both halves (before and from 2021), but leverage crowding pointed the wrong way in both, so it was set to zero. " +
         "The edge is modest: the score's rank correlation with the next 30 days was +0.14, against about \u00b10.08 from chance alone, and +0.10 since 2021. " +

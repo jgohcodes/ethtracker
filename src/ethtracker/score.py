@@ -189,6 +189,7 @@ def unscored_lines(cfg) -> dict[str, tuple[str, str, tuple[float, ...]]]:
     """The same for the unscored signals: unit, what the line is, and where the signal's reading flips."""
     return {
         "rsi": ("index", "RSI, 14 days", (cfg.rsi_oversold, cfg.rsi_overbought)),
+        "hammer": ("pct", "lower wick as a share of the day's range", (0.6,)),
         "rsi_rollover": ("index", "RSI, 14 days", (cfg.rsi_overbought,)),
         "extension": ("z", "std devs from the 20-day mean", (-cfg.extension_z, cfg.extension_z)),
         "volatility": ("ratio", "the higher of 7d/30d realised vol and ATR/its 180d median", (cfg.vol_spike_ratio,)),
@@ -281,8 +282,9 @@ def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.Dat
     scored component with its weight, 30-day line and daily states, and the unscored signals the same way."""
     st = states(cfg, history, funding8h)
     rd = readings(history, funding8h).tail(STRIP_DAYS)
-    score = combine(st)
-    fine = combine(continuous(history, funding8h))
+    ct = continuous(history, funding8h)
+    step = combine(st)
+    score = combine(ct)  # the score shown: each part on its sliding scale, so it moves inside a step
     today = float(score.iloc[-1]) if pd.notna(score.iloc[-1]) else None
     path = score.tail(HISTORY_DAYS)
     ago = {str(k): (float(score.iloc[-1 - k]) if len(score) > k and pd.notna(score.iloc[-1 - k]) else None) for k in (3, 7, 14)}
@@ -294,19 +296,17 @@ def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.Dat
         components.append({
             "key": c.key, "name": c.name, "weight": c.weight, "evidence": c.evidence, "reads": c.reads,
             "state": None if pd.isna(now) else int(now),
-            "contribution": None if pd.isna(now) or today is None else float(now * c.weight / sum(
-                w for k, w in WEIGHTS.items() if pd.notna(st[k].iloc[-1]))),
+            "contribution": None if pd.isna(ct[c.key].iloc[-1]) or today is None else float(ct[c.key].iloc[-1] * c.weight / sum(
+                w for k, w in WEIGHTS.items() if pd.notna(ct[k].iloc[-1]))),
             "strip": [None if pd.isna(v) else int(v) for v in strip],
             "line": {"unit": unit, "label": name, "values": [_value(v) for v in rd[c.key]], "thresholds": list(flips),
                      "second": {"label": second, "values": [_value(v) for v in rd[f"{c.key}_2"]]} if second else None},
         })
     return {
         "value": today, "label": label(today) if today is not None else None, "ago": ago,
-        "history": [{"date": f"{d:%Y-%m-%d}", "score": round(float(v), 4), "close": round(float(history["close"][d]), 2),
-                     "fine": None if pd.isna(fine.get(d)) else round(float(fine[d]), 4)}
+        "history": [{"date": f"{d:%Y-%m-%d}", "score": round(float(v), 4), "close": round(float(history["close"][d]), 2)}
                     for d, v in path.items() if pd.notna(v)],
-        "fine": None if pd.isna(fine.iloc[-1]) else float(fine.iloc[-1]),
-        "fine_ago": {str(k): (float(fine.iloc[-1 - k]) if len(fine) > k and pd.notna(fine.iloc[-1 - k]) else None) for k in (3, 7, 14)},
+        "step": None if pd.isna(step.iloc[-1]) else float(step.iloc[-1]),
         "calibration": calibration(history, score, today) if today is not None else None,
         "components": components, "unscored": unscored(cfg, frame, derivs),
         "strip_dates": [f"{d:%Y-%m-%d}" for d in history.index[-STRIP_DAYS:]],
@@ -320,7 +320,7 @@ def at_times(cfg, history: pd.DataFrame, funding8h: pd.Series | None, derivs: pd
     """The score and the signals as they stood when each trade was made: on the completed daily closes before
     the trade's UTC day, the same basis as the buy log, so nothing from the trade's own day leaks in."""
     st = states(cfg, history, funding8h)
-    sc = combine(st)
+    sc = combine(continuous(history, funding8h))
     out = []
     for at in times:
         if not at:
@@ -499,3 +499,55 @@ def flips_per_year(score: pd.Series) -> float:
     changes = int((s != s.shift()).sum()) - 1
     years = (s.index[-1] - s.index[0]).days / 365.25
     return changes / years if years > 0 else float("nan")
+
+
+# ---- trading the score's crossings ---------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CrossRun:
+    multiple: float  # final value / starting cash
+    max_drawdown: float
+    in_market: float  # share of days holding any ETH
+    buys: int
+
+
+def cross_strategy(close: pd.Series, sc: pd.Series, sell: float = 1.0, take_profit: float | None = None,
+                   band: float = 0.0, fee: float = 0.0005) -> CrossRun:
+    """Spot ETH, all cash in when the score crosses above +``band``; when it crosses below -``band``, sell the share
+    ``sell`` of the ETH held. With ``take_profit``, also sell everything once the close is that far above the average
+    buy price. Trades at the signal day's close (the score uses that close), with ``fee`` a side."""
+    c, s = close.to_numpy(float), sc.to_numpy(float)
+    cash, eth, cost = 1.0, 0.0, 0.0
+    peak, mdd, held, buys = 1.0, 0.0, 0, 0
+    armed = None  # +1 after an up cross, -1 after a down cross
+    for i in range(1, len(c)):
+        if np.isnan(s[i]) or np.isnan(s[i - 1]):
+            continue
+        if s[i] > band and armed != 1:
+            if cash > 0:
+                q = cash * (1 - fee) / c[i]
+                cost += cash
+                eth, cash, buys = eth + q, 0.0, buys + 1
+            armed = 1
+        elif s[i] < -band and armed != -1:
+            if eth > 0:
+                q = eth * sell
+                cash += q * c[i] * (1 - fee)
+                cost *= (1 - sell)
+                eth -= q
+            armed = -1
+        if take_profit is not None and eth > 0 and cost > 0 and eth * c[i] >= cost * (1 + take_profit):
+            cash += eth * c[i] * (1 - fee)
+            eth, cost = 0.0, 0.0
+        value = cash + eth * c[i]
+        peak = max(peak, value)
+        mdd = max(mdd, 1 - value / peak)
+        held += eth > 0
+    final = cash + eth * c[-1]
+    return CrossRun(final, mdd, held / max(len(c) - 1, 1), buys)
+
+
+def hold(close: pd.Series) -> CrossRun:
+    c = close.to_numpy(float)
+    v = c / c[0]
+    return CrossRun(float(v[-1]), float((1 - v / np.maximum.accumulate(v)).max()), 1.0, 1)

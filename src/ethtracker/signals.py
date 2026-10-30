@@ -183,6 +183,18 @@ def _technical(cfg: Config, df: pd.DataFrame, anchor: pd.Timestamp | None, signa
     else:
         notes.append(f"the 200d trend signal needs 200 daily candles (have {n})")
 
+    if n >= 31:
+        hit, share = indicators.hammers(df)
+        lower = _f(share.iloc[-1])
+        if bool(hit.iloc[-2]) and price > float(close.iloc[-2]):
+            signals.append(Signal("hammer", 1, False, "Hammer confirmed: yesterday's long lower wick, then a higher close "
+                                  "(6 cases since 2021, 4 higher a month on: anecdote, not evidence)", value=lower))
+        elif bool(hit.iloc[-1]):
+            signals.append(Signal("hammer", 0, False, f"Hammer: long lower wick ({lower:.0%} of the range) after a fall. "
+                                  "Alone it came before weaker months (38% higher since 2021); wait for a higher close", value=lower))
+        elif lower is not None:
+            signals.append(Signal("hammer", 0, False, f"No hammer: lower wick {lower:.0%} of the day's range", value=lower))
+
     row = technical_series(cfg, df).iloc[-1]
     z = _f(row["z20"])
     if z is not None:

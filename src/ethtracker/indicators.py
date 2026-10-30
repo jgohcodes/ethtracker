@@ -58,6 +58,20 @@ def adverse_excursions(df: pd.DataFrame, side: str, horizon: int) -> np.ndarray:
 
 
 SMA_WINDOWS = (20, 50, 100, 200)
+def hammers(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """(hammer days, lower wick as a share of the day's range). A hammer: the low reaches at least 1 ATR under the
+    previous close, the lower wick is at least 60% of the range and twice the body, and price is 15%+ under its
+    30-day high."""
+    o, h, l, c = (df[k] for k in ("open", "high", "low", "close"))
+    rng = (h - l).replace(0, np.nan)
+    lower = np.minimum(o, c) - l
+    share = lower / rng
+    shape = (share >= 0.6) & (lower >= 2 * (c - o).abs())
+    deep = l <= c.shift(1) - atr(df).shift(1)
+    pullback = c <= h.rolling(30).max() * 0.85
+    return (shape & deep & pullback).fillna(False), share
+
+
 SWING_SR = 0.15  # a swing high or low counts once price has moved this far away from it
 SWING_YEARS = 2
 

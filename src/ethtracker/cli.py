@@ -451,6 +451,47 @@ def _fear_greed(index: pd.DatetimeIndex) -> pd.Series | None:
         return None
 
 
+CROSS_RULES = (
+    [("sell all on a down cross", {})]
+    + [(f"sell {int(f * 100)}% on a down cross", {"sell": f}) for f in (0.25, 0.5, 0.75)]
+    + [(f"take profit at +{int(t * 100)}%, else sell all", {"take_profit": t}) for t in (0.1, 0.2, 0.3, 0.5, 1.0)]
+    + [(f"crosses beyond +/-{b:.1f} only, sell all", {"band": b}) for b in (0.1, 0.2)]
+)
+
+
+def _cross_table(full: pd.DataFrame, step: pd.Series, fine: pd.Series) -> None:
+    """Buy ETH spot with all cash when the score crosses above zero, sell on the way down: by era, each era from cash,
+    with the take-profit variants chosen on the years to 2020 and judged on 2021 on."""
+    print()
+    print("Trading the score's crossings (spot, all cash in on an up cross, 0.05% a side), each era from cash:")
+    print("  final multiple / max drawdown / share of days in the market / buys")
+    print(f"  {'rule':<40} " + " ".join(f"{e:>28}" for e, *_ in SCORE_ERAS))
+    rows = [("buy and hold", None, None)] + [("step score, " + n, step, kw) for n, kw in CROSS_RULES[:1]] \
+        + [("continuous, " + n, fine, kw) for n, kw in CROSS_RULES]
+    best = {}
+    for name, s, kw in rows:
+        cells = []
+        for e, start, end in SCORE_ERAS:
+            m = pd.Series(True, index=full.index)
+            if start:
+                m &= full.index >= pd.Timestamp(start, tz="UTC")
+            if end:
+                m &= full.index < pd.Timestamp(end, tz="UTC")
+            close = full.loc[m, "close"]
+            if len(close) < 30:
+                cells.append("n/a")
+                continue
+            r = score.hold(close) if s is None else score.cross_strategy(close, s[m], **kw)
+            cells.append(f"{r.multiple:>7.2f}x {r.max_drawdown:>4.0%} {r.in_market:>4.0%} {r.buys:>4}")
+            best.setdefault(e, {})[name] = r.multiple
+        print(f"  {name:<40} " + " ".join(f"{c:>28}" for c in cells))
+    if "to 2020" not in best or "2021 on" not in best:
+        return
+    pick = max((n for n in best["to 2020"] if n.startswith("continuous")), key=lambda n: best["to 2020"][n])
+    print(f"  Best continuous rule on the years to 2020: {pick}. Its 2021-on result: {best['2021 on'][pick]:.2f}x, "
+          f"against buy and hold {best['2021 on']['buy and hold']:.2f}x.")
+
+
 def _fear_greed_overlap(fg, step, fine, fwd, index, era) -> None:
     """Does Fear & Greed add anything the score does not already carry? Its correlation with the score, the IC of
     what is left of it once the score is taken out, and the score's IC with it added at a fifth of the weight."""
@@ -495,18 +536,11 @@ def _setups(full: pd.DataFrame) -> dict[str, pd.Series]:
 
 
 def _hammers(full: pd.DataFrame) -> dict[str, pd.Series]:
-    """Long lower wicks after a fall: the low reaches at least 1 ATR under the previous close, the lower wick is at
-    least 60% of the day's range and twice the body, and price is 15%+ under its 30-day high."""
-    o, h, l, c = (full[k] for k in ("open", "high", "low", "close"))
-    rng = (h - l).replace(0, np.nan)
-    lower = np.minimum(o, c) - l
-    body = (c - o).abs()
-    atr = indicators.atr(full).shift(1)
-    pullback = c <= h.rolling(30).max() * 0.85
-    shape = (lower >= 0.6 * rng) & (lower >= 2 * body)
-    deep = l <= c.shift(1) - atr
-    return {"Hammer: long lower wick after a fall": shape & deep & pullback,
-            "Hammer, then a higher close next day": (shape & deep & pullback).shift(1, fill_value=False) & (c > c.shift(1))}
+    """Long lower wicks after a fall (``indicators.hammers``), alone and with a higher close the next day."""
+    hit, _ = indicators.hammers(full)
+    c = full["close"]
+    return {"Hammer: long lower wick after a fall": hit,
+            "Hammer, then a higher close next day": hit.shift(1, fill_value=False) & (c > c.shift(1))}
 
 
 def _fear_greed_setups(fg: pd.Series) -> dict[str, pd.Series]:
@@ -603,6 +637,8 @@ def cmd_score_study(args, ctx: Ctx) -> int:
         _fear_greed_overlap(fg, step, fine, fwd, full.index, era)
     both = step.notna() & fine.notna()
     print(f"  correlation between the two: {score.rank_ic(step[both], fine[both]):+.2f}")
+
+    _cross_table(full, step, fine)
 
     print()
     print(f"Entry setups: what followed the days each fired, {args.horizon} days on (higher / median / fell 10%+ within)")
