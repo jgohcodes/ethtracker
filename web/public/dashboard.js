@@ -698,7 +698,8 @@ function scorePriceChart(history, trades = []) {
   });
   const line = days.map((d, i) => (finite(d.close) ? `${x(i).toFixed(1)},${yp(d.close).toFixed(1)}` : null)).filter(Boolean).join(" ");
   const hits = days.map((d, i) => svg("rect", { x: (L + i * step).toFixed(2), y: T, width: step.toFixed(2), height: ph, class: "sp__hit" },
-    svg("title", {}, document.createTextNode(`${d.date}: score ${signedFixed(d.score)}, ETH ${usd(d.close, 0)}`))));
+    svg("title", {}, document.createTextNode(`${d.date}: score ${signedFixed(d.score)}` +
+      (finite(d.fine) ? ` (continuous ${signedFixed(d.fine)})` : "") + `, ETH ${usd(d.close, 0)}`))));
   const text = (attrs, t) => svg("text", attrs, document.createTextNode(t));
   const ticks = [0, Math.floor((n - 1) / 2), n - 1].map((i, k) =>
     text({ x: x(i).toFixed(1), y: H - 5, "text-anchor": k === 0 ? "start" : k === 2 ? "end" : "middle", class: "sp__axis" }, shortDate(days[i].date)));
@@ -711,6 +712,7 @@ function scorePriceChart(history, trades = []) {
   [[1, "+1"], [0, "0"], [-1, "−1"]].map(([v, t]) => text({ x: L - 6, y: (ys(v) + 3.5).toFixed(1), "text-anchor": "end", class: "sp__axis" }, t)),
   bars,
   svg("polyline", { points: line, class: "sp__price" }),
+  fineLine(days, x, ys),
   finite(last.close) ? svg("circle", { cx: x(n - 1).toFixed(1), cy: yp(last.close).toFixed(1), r: 3.2, class: "sp__now" }) : null,
   priceLabels(closes, last.close, yp, L + pw + 6, T + 9, T + ph).map(([y, t, now]) =>
     text({ x: L + pw + 6, y: y.toFixed(1), class: now ? "sp__axis sp__axis--now" : "sp__axis" }, t)),
@@ -745,6 +747,12 @@ function tradeMarkers(trades, days, x, right, top, height, step) {
   });
 }
 
+// The continuous score on the bars' axis: it moves every day, so a slide inside a step shows.
+function fineLine(days, x, ys) {
+  const pts = days.map((d, i) => (finite(d.fine) ? `${x(i).toFixed(1)},${ys(d.fine).toFixed(1)}` : null)).filter(Boolean);
+  return pts.length > 1 ? svg("polyline", { points: pts.join(" "), class: "sp__fine" }) : null;
+}
+
 // The right axis: the period's high and low, and today's close beside its point; a high or low label that
 // would sit on top of today's is dropped.
 function priceLabels(closes, now, yp, x, top, bottom) {
@@ -766,7 +774,8 @@ function scoreChartBlock(history, trades = []) {
       h("div", { class: "sp-head" },
         h("div", { class: "sp-key" },
           h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__bars", "aria-hidden": "true" }), "Signal score (left axis)"),
-          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__line", "aria-hidden": "true" }), "ETH daily close (right axis)")),
+          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__line", "aria-hidden": "true" }), "ETH daily close (right axis)"),
+          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__fine", "aria-hidden": "true" }), "Continuous score (left axis)")),
         h("div", { class: "seg", role: "group", "aria-label": "Chart range" }, buttons)),
       scorePriceChart(history, trades));
   };
@@ -792,6 +801,9 @@ function renderScore(s) {
     .map(([k, t]) => h("span", { class: "ago" }, h("span", { class: "muted", text: `${t} ` }), signedFixed(sc.ago[k])));
   const lead = h("div", { class: "score__lead" },
     h("div", { class: "score__value" }, h("span", { class: "score__number", text: signedFixed(sc.value) }), badge(info.tone, info.icon, info.label, true)),
+    finite(sc.fine) ? h("div", { class: "score__fine" },
+      h("span", { class: "muted", text: "Continuous " }), h("strong", { text: signedFixed(sc.fine) }),
+      h("span", { class: "muted", text: ` · 3 days ago ${signedFixed(sc.fine_ago?.["3"])}, 7 days ${signedFixed(sc.fine_ago?.["7"])}, 14 days ${signedFixed(sc.fine_ago?.["14"])}` })) : null,
     h("div", { class: "score__ago" }, ago));
   // the institutional era leads; the full history follows, because the large early swings skew its averages
   const recentLine = cal?.same_recent?.days

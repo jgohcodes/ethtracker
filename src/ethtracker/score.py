@@ -165,6 +165,26 @@ def readings(df: pd.DataFrame, funding8h: pd.Series | None = None) -> pd.DataFra
     }, index=df.index)
 
 
+VOL_DAYS = 30  # daily volatility for scaling the continuous parts
+
+
+def continuous(df: pd.DataFrame, funding8h: pd.Series | None = None) -> pd.DataFrame:
+    """The scored parts on a sliding scale from -1 to +1 instead of a step: each reading divided by how far it
+    normally moves (ETH's daily volatility over the reading's horizon), then squashed with tanh. Same signs as
+    ``states``; a part that is negative and getting more so reads lower each day instead of sitting at -1."""
+    rd = readings(df, funding8h)
+    vol = np.log(df["close"]).diff().rolling(VOL_DAYS).std()
+    scale = lambda days: vol * np.sqrt(days)  # noqa: E731
+    out = pd.DataFrame(index=df.index)
+    out["momentum"] = (np.tanh(rd["momentum"] / scale(28)) + np.tanh(rd["momentum_2"] / scale(7))) / 2
+    out["trend"] = (np.tanh(rd["trend"] / scale(25)) + np.tanh(rd["trend_2"] / scale(15))) / 2
+    out["long_trend"] = np.tanh(rd["long_trend"] / scale(100))
+    _, hi = LINES["volume"][3]
+    out["volume"] = np.tanh(rd["volume"] / (2 * hi))
+    out["crowding"] = np.where(rd["crowding"].isna(), np.nan, -np.clip((rd["crowding"] - 0.5) / (CROWDED - 0.5), 0, 1))
+    return out.where(rd[out.columns].notna())
+
+
 def unscored_lines(cfg) -> dict[str, tuple[str, str, tuple[float, ...]]]:
     """The same for the unscored signals: unit, what the line is, and where the signal's reading flips."""
     return {
@@ -262,6 +282,7 @@ def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.Dat
     st = states(cfg, history, funding8h)
     rd = readings(history, funding8h).tail(STRIP_DAYS)
     score = combine(st)
+    fine = combine(continuous(history, funding8h))
     today = float(score.iloc[-1]) if pd.notna(score.iloc[-1]) else None
     path = score.tail(HISTORY_DAYS)
     ago = {str(k): (float(score.iloc[-1 - k]) if len(score) > k and pd.notna(score.iloc[-1 - k]) else None) for k in (3, 7, 14)}
@@ -281,8 +302,11 @@ def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.Dat
         })
     return {
         "value": today, "label": label(today) if today is not None else None, "ago": ago,
-        "history": [{"date": f"{d:%Y-%m-%d}", "score": round(float(v), 4), "close": round(float(history["close"][d]), 2)}
+        "history": [{"date": f"{d:%Y-%m-%d}", "score": round(float(v), 4), "close": round(float(history["close"][d]), 2),
+                     "fine": None if pd.isna(fine.get(d)) else round(float(fine[d]), 4)}
                     for d, v in path.items() if pd.notna(v)],
+        "fine": None if pd.isna(fine.iloc[-1]) else float(fine.iloc[-1]),
+        "fine_ago": {str(k): (float(fine.iloc[-1 - k]) if len(fine) > k and pd.notna(fine.iloc[-1 - k]) else None) for k in (3, 7, 14)},
         "calibration": calibration(history, score, today) if today is not None else None,
         "components": components, "unscored": unscored(cfg, frame, derivs),
         "strip_dates": [f"{d:%Y-%m-%d}" for d in history.index[-STRIP_DAYS:]],

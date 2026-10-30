@@ -231,6 +231,9 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
 .sp__bar--pos { fill: var(--good); opacity: 0.55; }
 .sp__bar--neg { fill: var(--critical); opacity: 0.55; }
 .sp__bar--flat { fill: var(--muted); opacity: 0.5; }
+.sp__fine { fill: none; stroke: var(--serious); stroke-width: 1.6; stroke-dasharray: 4 2; stroke-linejoin: round; }
+.sp-key__fine { display: inline-block; width: 16px; border-top: 2px dashed var(--serious); }
+.score__fine { font-size: 14px; font-variant-numeric: tabular-nums; }
 .sp__price { fill: none; stroke: var(--ink); stroke-width: 1.7; stroke-linejoin: round; }
 .sp__now { fill: var(--ink); stroke: var(--surface); stroke-width: 1.5; }
 .sp__axis { font-size: 10.5px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }

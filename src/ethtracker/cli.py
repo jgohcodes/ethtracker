@@ -485,6 +485,22 @@ def cmd_score_study(args, ctx: Ctx) -> int:
             ics.append(score.rank_ic(sc[m], fwd.loc[m, "ret"]))
         print(f"  {name:<34} " + "  ".join(f"{e}: {ic:+.2f}" for (e, *_), ic in zip(SCORE_ERAS, ics)))
 
+    fine = score.combine(score.continuous(full, funding8h))
+    step = score.combine(st)
+    print()
+    print(f"Continuous score (each part on a sliding scale) against the step score, next {args.horizon} days")
+    for name, s in (("step score (shown)", step), ("continuous score", fine)):
+        ics = []
+        for _, start, end in SCORE_ERAS:
+            m = era(full.index, start, end) & s.notna() & fwd["ret"].notna()
+            ics.append(score.rank_ic(s[m], fwd.loc[m, "ret"]))
+        flips = score.flips_per_year(s)
+        moves = s.diff().abs()
+        print(f"  {name:<22} " + "  ".join(f"{e}: {ic:+.2f}" for (e, *_), ic in zip(SCORE_ERAS, ics))
+              + f"  | days it moved: {(moves > 1e-9).mean():.0%}, sign flips a year: {flips:.0f}")
+    both = step.notna() & fine.notna()
+    print(f"  correlation between the two: {score.rank_ic(step[both], fine[both]):+.2f}")
+
     sc = score.combine(st)
     print()
     print(f"What followed each score bucket (the score as weighted), {args.horizon} days on")

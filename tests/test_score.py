@@ -222,4 +222,24 @@ def test_the_snapshot_gives_each_open_exchange_trade_its_signals_and_the_positio
     assert earlier["signals"] is None and a["signals"]["basis_close"] == f"{df.index[299]:%Y-%m-%d}"
     assert p["entry_score"] == pytest.approx((a["signals"]["score"] * 1 + b["signals"]["score"] * 2) / 3)
     assert "signals" not in account["positions"][0]["trades"][0]  # the input is left as it was
-    assert len(snap["score"]["history"][-1]) == 3 and snap["score"]["history"][-1]["close"] == pytest.approx(float(df["close"].iloc[-1]), abs=0.01)
+    assert {"date", "score", "close", "fine"} <= set(snap["score"]["history"][-1]) and snap["score"]["history"][-1]["close"] == pytest.approx(float(df["close"].iloc[-1]), abs=0.01)
+
+
+def test_the_continuous_parts_keep_the_steps_signs_and_move_inside_a_state():
+    df = synthetic_candles(700, seed=21)
+    st, ct = score.states(CFG, df), score.continuous(df)
+    for key in ("momentum", "trend", "long_trend", "volume"):
+        both = st[key].notna() & ct[key].notna()
+        assert (ct.loc[both & (st[key] == 1), key] > 0).all(), key
+        assert (ct.loc[both & (st[key] == -1), key] < 0).all(), key
+        assert ct[key].dropna().between(-1, 1).all(), key
+    fine, step = score.combine(ct), score.combine(st)
+    held = (step.diff() == 0) & step.notna()
+    assert (fine.diff()[held].abs() > 1e-9).mean() > 0.9  # it moves on days the step score does not
+
+
+def test_the_block_carries_the_continuous_score():
+    df = synthetic_candles(900, seed=6)
+    b = score.block(CFG, df, pd.Series(0.0001, index=df.index), df, None)
+    assert -1 <= b["fine"] <= 1 and b["history"][-1]["fine"] == pytest.approx(b["fine"], abs=1e-4)
+    assert set(b["fine_ago"]) == {"3", "7", "14"}
