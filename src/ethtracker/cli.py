@@ -392,6 +392,10 @@ def cmd_context(args, ctx: Ctx) -> int:
     risks = [plan.floor_risk(full, last, f) for f in floors]
     vol = risks[0]["vol_forecast"]
     print(f"Volatility: EWMA forecast {na(vol, pct)} a year, 30-day realised {na(risks[0]['vol_30d'], pct)}")
+    rsi_now = float(indicators.rsi(full["close"]).iloc[-1])
+    levels = [(t, indicators.close_for_rsi(full["close"], t)) for t in (30, 25, 21, 20, 70)]
+    print(f"RSI {rsi_now:.1f} on the {full.index[-1]:%Y-%m-%d} close; the next daily close for RSI "
+          + ", ".join(f"{t}: {usd(c)} ({c / last - 1:+.1%})" for t, c in levels if c))
     hist = next((r["history"] for r in risks if r["history"]), None)
     print()
     print("Reaching a floor. Touch: a driftless random walk at the forecast volatility. History: from days "

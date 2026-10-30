@@ -22,6 +22,23 @@ def rsi(close: pd.Series, n: int = 14) -> pd.Series:
     return 100 - 100 / (1 + gain / loss)
 
 
+def close_for_rsi(close: pd.Series, target: float, n: int = 14) -> float | None:
+    """The next close that would put Wilder's RSI at ``target``, from the averages as of the last close: a fall adds
+    to the average loss, a rise to the average gain, each smoothed as (13 x old + today) / 14."""
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / n, adjust=False, min_periods=n).mean().iloc[-1]
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / n, adjust=False, min_periods=n).mean().iloc[-1]
+    if not (0 < target < 100) or pd.isna(gain) or pd.isna(loss):
+        return None
+    r = target / (100 - target)  # average gain / average loss at the target
+    k = n - 1
+    down = k * gain / r - k * loss  # the fall that gets there with no gain today
+    if down >= 0:
+        return float(close.iloc[-1] - down)
+    up = r * k * loss - k * gain
+    return float(close.iloc[-1] + up)
+
+
 def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     """Wilder's average true range, in price units."""
     prev_close = df["close"].shift()

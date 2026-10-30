@@ -288,3 +288,15 @@ def test_swing_levels_are_real_turning_points_confirmed_by_a_move_away():
 def test_swing_levels_close_together_count_as_one_zone():
     from ethtracker import indicators
     assert indicators._zones([100.0, 101.0, 150.0, 151.5, 300.0]) == [100.5, 150.75, 300.0]
+
+
+def test_the_close_for_a_target_rsi_lands_on_that_rsi():
+    import numpy as np
+    import pandas as pd
+    from ethtracker import indicators
+    rng = np.random.default_rng(2)
+    close = pd.Series(2000 * np.exp(np.cumsum(rng.normal(0, 0.03, 300))), index=pd.date_range("2026-01-01", periods=300, tz="UTC"))
+    for target in (21, 30, 55, 75):
+        c = indicators.close_for_rsi(close, target)
+        nxt = pd.concat([close, pd.Series([c], index=[close.index[-1] + pd.Timedelta(days=1)])])
+        assert indicators.rsi(nxt).iloc[-1] == pytest.approx(target, abs=1e-6), target
