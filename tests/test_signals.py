@@ -282,3 +282,9 @@ def test_swing_levels_are_real_turning_points_confirmed_by_a_move_away():
     df = pd.DataFrame({"open": path, "high": path, "low": path, "close": path, "volume": 1.0}, index=idx, dtype=float)
     assert [(k, p) for _, k, p in indicators.swing_levels(df)] == [("high", 140.0), ("low", 110.0)]
     assert indicators.nearest_swings(df, 128.0) == {"swing_hi_1": 140.0, "swing_lo_1": 110.0}
+
+
+
+def test_swing_levels_close_together_count_as_one_zone():
+    from ethtracker import indicators
+    assert indicators._zones([100.0, 101.0, 150.0, 151.5, 300.0]) == [100.5, 150.75, 300.0]

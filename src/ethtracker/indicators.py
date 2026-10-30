@@ -97,11 +97,26 @@ def swing_levels(df: pd.DataFrame, swing: float = SWING_SR, years: int = SWING_Y
     return [x for x in out if x[0] >= since and x[0] != df.index[0]]
 
 
+CLUSTER = 0.02  # swing levels this close together are one zone
+
+
+def _zones(prices: list[float], width: float = CLUSTER) -> list[float]:
+    """Swing prices merged into zones: sorted, each joining the zone it is within ``width`` of; a zone is its mean."""
+    zones: list[list[float]] = []
+    for p in sorted(prices):
+        if zones and p <= zones[-1][0] * (1 + width):
+            zones[-1].append(p)
+        else:
+            zones.append([p])
+    return [sum(z) / len(z) for z in zones]
+
+
 def nearest_swings(df: pd.DataFrame, price: float, n: int = 2) -> dict[str, float]:
-    """The ``n`` nearest swing highs above ``price`` (resistance) and swing lows below it (support)."""
-    pts = swing_levels(df)
-    above = sorted({p for _, _, p in pts if p > price})[:n]
-    below = sorted({p for _, _, p in pts if p < price}, reverse=True)[:n]
+    """The ``n`` nearest swing zones above ``price`` (resistance) and below it (support); swing highs and lows within
+    2% of each other count as one zone, and a zone within 1% of the price is left out as the price itself."""
+    zones = _zones([p for _, _, p in swing_levels(df)])
+    above = [z for z in zones if z > price * 1.01][:n]
+    below = [z for z in reversed(zones) if z < price * 0.99][:n]
     out = {f"swing_hi_{i + 1}": p for i, p in enumerate(above)}
     out.update({f"swing_lo_{i + 1}": p for i, p in enumerate(below)})
     return out
