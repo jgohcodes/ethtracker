@@ -435,6 +435,29 @@ def _candidate_states(cfg, full: pd.DataFrame) -> pd.DataFrame:
 SCORE_ERAS = (("all", None, None), ("to 2020", None, "2021-01-01"), ("2021 on", "2021-01-01", None))
 
 
+def _setups(full: pd.DataFrame) -> dict[str, pd.Series]:
+    """Entry setups traders cite, as days they fire, each from data up to that day's close only."""
+    close = full["close"]
+    rsi = indicators.rsi(close)
+    s10, s50 = indicators.sma(close, 10), indicators.sma(close, 50)
+    rising, falling = s50 > s50.shift(10), s50 < s50.shift(10)
+    # bullish divergence: today's close is below the lowest close of 5 to 30 days ago, but RSI is above RSI on that day
+    prior_low = close.shift(5).rolling(26).min()
+    prior_day = close.shift(5).rolling(26).apply(lambda w: w.argmin(), raw=True)
+    pos = np.arange(len(close))
+    idx = (pos - 5 - (25 - prior_day.fillna(0).astype(int))).clip(0)
+    rsi_then = pd.Series(rsi.to_numpy()[idx], index=close.index).where(prior_low.notna())
+    divergence = (close < prior_low) & (rsi > rsi_then) & (rsi < 50)
+    recent_div = divergence.rolling(5, min_periods=1).max().astype(bool)
+    return {
+        "Every day (baseline)": close.notna(),
+        "50d rising, RSI <= 40": rising & (rsi <= 40),
+        "50d falling, RSI <= 30": falling & (rsi <= 30),
+        "Bullish RSI divergence": divergence,
+        "Divergence, then close > 10d avg": recent_div & (close > s10) & ~(close.shift(1) > s10.shift(1)),
+    }
+
+
 def cmd_score_study(args, ctx: Ctx) -> int:
     asset, full, cfg, funding8h = _asset_history(args, ctx, "the signal score: does each part point the right way, "
                                                             "and what followed each score?")
@@ -500,6 +523,18 @@ def cmd_score_study(args, ctx: Ctx) -> int:
               + f"  | days it moved: {(moves > 1e-9).mean():.0%}, sign flips a year: {flips:.0f}")
     both = step.notna() & fine.notna()
     print(f"  correlation between the two: {score.rank_ic(step[both], fine[both]):+.2f}")
+
+    print()
+    print(f"Entry setups: what followed the days each fired, {args.horizon} days on (higher / median / fell 10%+ within)")
+    print(f"  {'setup':<36} " + " ".join(f"{e:>30}" for e, *_ in SCORE_ERAS))
+    for name, fired in _setups(full).items():
+        cells = []
+        for _, start, end in SCORE_ERAS:
+            m = era(full.index, start, end) & fired.fillna(False) & fwd["ret"].notna()
+            r = fwd.loc[m, "ret"]
+            cells.append(f"{int(m.sum()):>4}d/{signals.count_episodes(m):>3}ep {(r > 0).mean():>4.0%} {r.median():>+6.1%} {fwd.loc[m, 'fell'].mean():>4.0%}"
+                         if m.any() else "n/a")
+        print(f"  {name:<36} " + " ".join(f"{c:>30}" for c in cells))
 
     sc = score.combine(st)
     print()
