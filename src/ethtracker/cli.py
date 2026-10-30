@@ -467,7 +467,9 @@ def _cross_table(full: pd.DataFrame, step: pd.Series, fine: pd.Series) -> None:
     print("  final multiple / max drawdown / share of days in the market / buys")
     print(f"  {'rule':<40} " + " ".join(f"{e:>28}" for e, *_ in SCORE_ERAS))
     rows = [("buy and hold", None, None)] + [("step score, " + n, step, kw) for n, kw in CROSS_RULES[:1]] \
-        + [("continuous, " + n, fine, kw) for n, kw in CROSS_RULES]
+        + [("continuous, " + n, fine, kw) for n, kw in CROSS_RULES] \
+        + [("a day late: step score, sell all", step.shift(1), {}),
+           ("a day late: continuous +/-0.1, sell all", fine.shift(1), {"band": 0.1})]
     best = {}
     for name, s, kw in rows:
         cells = []
