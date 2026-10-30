@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from . import advice, alerts, coinbase, combo, config, cycles, decisions, derivs, dipbuy, indicators, observed, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
+from . import advice, alerts, coinbase, combo, config, cycles, decisions, derivs, dipbuy, indicators, levelstudy, observed, plan, score, pullbacks, risk, shorts, signals, snapshot, study, swing
 from .data import DataError, Provider, get_provider
 from .journal import Journal
 from .store import CachedProvider
@@ -496,6 +496,21 @@ def _setups(full: pd.DataFrame) -> dict[str, pd.Series]:
 def _fear_greed_setups(fg: pd.Series) -> dict[str, pd.Series]:
     return {"Fear & Greed <= 25 (extreme fear)": fg <= 25, "Fear & Greed 26-74": (fg > 25) & (fg < 75),
             "Fear & Greed >= 75 (extreme greed)": fg >= 75}
+
+
+def cmd_level_study(args, ctx: Ctx) -> int:
+    asset, full, cfg, _ = _asset_history(args, ctx, "do swing support and resistance zones hold better than nearby prices?")
+    full, _ = cycles.ignore_flash_prints(full)
+    print(levelstudy.__doc__.split("\n\n", 1)[1].strip())
+    print()
+    print(f"  {'era':<10} {'zone':<20} {'touches':>8} {'rejected':>9} {'held 5d':>8} {'bounced':>8}")
+    for era, start, end in SCORE_ERAS:
+        part = full if end is None else full[full.index < pd.Timestamp(end, tz="UTC")]
+        res = levelstudy.run(part, pd.Timestamp(start, tz="UTC") if start else None)
+        for name, r in res.items():
+            rej, held, bounce = r.rates()
+            print(f"  {era:<10} {name:<20} {r.touches:>8} {rej:>9.0%} {held:>8.0%} {bounce:>8.0%}")
+    return 0
 
 
 def cmd_score_study(args, ctx: Ctx) -> int:
@@ -2142,6 +2157,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
     sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
     sp.add_argument("--horizon", type=int, default=score.HORIZON, help="days ahead to judge each reading on")
+
+    sp = add("level-study", cmd_level_study, "check swing support and resistance zones against placebo levels, by era")
+    sp.add_argument("--asset", choices=["ETH", "BTC", "eth", "btc"], default="ETH")
+    sp.add_argument("--days", type=int, default=4000, help="daily candles to fetch")
 
     add("account-check", cmd_account_check, "which Coinbase endpoints your view-only key can read (shapes only, no values)")
 

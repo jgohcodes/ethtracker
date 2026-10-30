@@ -139,6 +139,9 @@ jobs:
       - name: Score study, ETH
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'score')) }}
         run: ethtracker score-study --asset ETH --days 4000
+      - name: Level study, ETH
+        if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'levels')) }}
+        run: ethtracker level-study --asset ETH --days 4000
       # Putting cash to work now or bidding lower, when each buy is sized to a liquidation floor.
       - name: Entry study, ETH
         if: ${{ inputs.study && (inputs.studies == 'all' || contains(inputs.studies, 'entry')) }}
