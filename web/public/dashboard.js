@@ -1,7 +1,7 @@
 import {
   usd, signedUsd, fixed, pct, signedPct, ageSeconds, freshness, humanAge, actionInfo, biasGlyph,
   priceLadder, isValidSymbol, describeInterval, finite, chance, eth, funding8h, PLAN_STATUS, TREND, CROWDING, lookup,
-  SCORE, signedFixed, stateWord, stripSummary, reading, lineSummary, shortDate, shortTime, utcTime, scoreLabel,
+  SCORE, signedFixed, stateWord, stripSummary, reading, lineSummary, shortDate, utcTime, scoreLabel,
 } from "./format.mjs";
 
 const TOKEN_KEY = "ethtracker.viewToken";
@@ -172,6 +172,13 @@ function renderKpis(s) {
   $("kpis").replaceChildren(...tiles);
 }
 
+// Open P&L from the average entry, summed over the exchange positions. Coinbase's own unrealized figure on the
+// app's perp counts only since the last daily settlement, which moves the P&L so far into the cash balance.
+function openPnl(s) {
+  const vals = (s.account?.positions ?? []).map((p) => p.pnl_since_entry).filter(finite);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
+}
+
 // No journal yet: the top row shows the exchange's own account instead, and says so.
 function exchangeTiles(s) {
   const sm = s.account.summary;
@@ -179,8 +186,8 @@ function exchangeTiles(s) {
   const total = finite(sm.total) ? sm.total : finite(sm.collateral) && finite(sm.unrealized) ? sm.collateral + sm.unrealized : null;
   const tiles = [
     tile("Equity, on Coinbase", usd(total), `collateral ${usd(sm.collateral)} · not in your journal yet`),
-    tile("Open PnL, on Coinbase", delta(sm.unrealized, signedUsd(sm.unrealized)),
-      finite(sm.collateral) && sm.collateral > 0 ? `${signedPct(sm.unrealized / sm.collateral)} of collateral` : ""),
+    tile("Open P&L since entry", delta(openPnl(s), signedUsd(openPnl(s))),
+      `mark against average entry · ${signedUsd(sm.unrealized)} since the last daily settlement`),
   ];
   if (p && finite(p.notional) && finite(total) && total > 0) {
     tiles.push(tile("Leverage, on Coinbase", `${fixed(p.notional / total, 2)}x`, `position ${usd(p.notional, 0)} / equity`));
@@ -429,11 +436,12 @@ function renderAccount(s) {
         metric("Mark", usd(p.mark)),
         metric(p.liquidation_from === "buffer" ? "Liquidation, from Coinbase's buffer" : "Liquidation, per Coinbase", usd(liq)),
         gap === null ? null : metric("Versus this tool's estimate", `${gap >= 0 ? "+" : "−"}${usd(Math.abs(gap))}`),
-        metric("Open PnL", delta(p.unrealized, signedUsd(p.unrealized))),
+        finite(p.pnl_since_entry) ? metric("Open P&L since entry", delta(p.pnl_since_entry, signedUsd(p.pnl_since_entry))) : null,
+        finite(p.unrealized) ? metric("Since the last daily settlement", delta(p.unrealized, signedUsd(p.unrealized))) : null,
         p.leverage === null || p.leverage === undefined ? null : metric("Leverage", `${fixed(p.leverage, 2)}x`),
         p.notional === null || p.notional === undefined ? null : metric("Position value", usd(p.notional, 0)),
         finite(p.entry_score) ? metric("Signal score at entry", scoreValue(p.entry_score)) : null),
-      openTrades(p, s.price, s, numbered));
+      openTrades(p, finite(p.mark) ? p.mark : s.price, s, numbered));
   });
   const sm = a.summary;
   const summary = sm ? h("div", { class: "metrics" },
@@ -456,9 +464,8 @@ function scoreValue(v) {
 
 // When a trade was made: its fill time; or, worked out from the position, the two runs it fell between.
 function tradeWhen(t) {
-  if (t.first_seen) return `Held by ${shortTime(t.seen_at)} UTC`;
-  if (t.seen_at && t.after) return `${shortTime(t.after)} – ${shortTime(t.seen_at)} UTC`;
-  return t.time ? `${shortTime(t.time)} UTC` : "Before the trades read";
+  if (t.first_seen) return `By ${shortDate(t.seen_at)}`;
+  return t.time ? shortDate(t.time) : "Before the trades read";
 }
 
 // Every open trade on the exchange, numbered oldest first across positions: the table rows and the chart's
@@ -502,6 +509,7 @@ function openTrades(p, price, s, numbered) {
   const rows = numbered.filter((x) => x.p === p).map(({ n, t }) => {
     const then = t.signals;
     const since = finite(t.price) && finite(price) ? sign * (price / t.price - 1) : null;
+    const pnl = finite(t.price) && finite(price) && finite(t.size) ? (price - t.price) * t.size : null;
     const states = Object.fromEntries((then?.components ?? []).map((c) => [c.key, c.state]));
     return h("tr", { "data-trade": String(n), ...focusable(n) },
       h("td", { class: "num" }, h("span", { class: "trade-no", text: String(n) })),
@@ -511,6 +519,7 @@ function openTrades(p, price, s, numbered) {
       h("td", { class: "num", text: fixed(Math.abs(t.size), 4) }),
       h("td", { class: "num", text: finite(t.price) ? usd(t.price) : "n/a" }),
       h("td", { class: "num" }, since === null ? "n/a" : delta(since, signedPct(since))),
+      h("td", { class: "num" }, pnl === null ? "n/a" : delta(pnl, signedUsd(pnl))),
       h("td", {}, then && finite(then.score) ? scoreValue(then.score) : "n/a",
         then ? h("div", { class: "sub-line muted", text: `${then.basis_close} close` }) : null),
       PARTS.map((k) => partCell(states[k])),
@@ -521,11 +530,12 @@ function openTrades(p, price, s, numbered) {
   const nowFiring = (sc?.unscored ?? []).filter((u) => u.state || u.risk).map((u) => ({ name: u.name, bias: u.state ?? 0, risk: u.risk, headline: u.headline }));
   const now = sc && finite(sc.value) ? h("tr", { class: "trades__now" },
     h("td", {}), h("td", { text: "Now" }), h("td", {}), h("td", { class: "num", text: usd(price) }), h("td", {}),
+    h("td", { class: "num" }, finite(p.pnl_since_entry) ? delta(p.pnl_since_entry, signedUsd(p.pnl_since_entry)) : ""),
     h("td", {}, scoreValue(sc.value), h("div", { class: "sub-line muted", text: `${s.close_date} close` })),
     PARTS.map((k) => partCell(nowStates[k])), firingCell(nowFiring)) : null;
   const head = h("thead", {}, h("tr", {},
     h("th", { class: "num", text: "#" }), h("th", { text: "Opened" }), h("th", { class: "num", text: "ETH open" }),
-    h("th", { class: "num", text: "Price" }), h("th", { class: "num", text: "Since" }), h("th", { text: "Score then" }),
+    h("th", { class: "num", text: "Price" }), h("th", { class: "num", text: "Since" }), h("th", { class: "num", text: "P&L" }), h("th", { text: "Score then" }),
     h("th", { text: "Mom." , title: "Momentum, 7 and 28 days" }), h("th", { text: "Trend", title: "Trend, 20 vs 50 days" }),
     h("th", { text: "200d", title: "Long trend, 200 days" }), h("th", { text: "Vol.", title: "Volume pressure, 10 days" }),
     h("th", { text: "Other signals firing" })));

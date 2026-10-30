@@ -194,6 +194,7 @@ def probe(client: Client) -> list[str]:
                 if eth and name == "positions":
                     parsed = position_from(eth[0])
                     lines.append(f"    values read: {_read(parsed, skip=('product', 'side', 'liquidation_from'))}")
+                    lines.append("    open P&L check: " + _pnl_check(parsed))
                     for key, names in POSITION_FIELDS.items():
                         if parsed[key] is None:
                             field = next((n for n in names if n in eth[0]), names[0])
@@ -252,6 +253,17 @@ def _epoch(value: str) -> float:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
+
+
+def _pnl_check(p: dict) -> str:
+    """Which of Coinbase's P&L figures match (mark - entry) x size and (mark - settled price) x size: yes/no only."""
+    since_entry, size, mark = p.get("pnl_since_entry"), p.get("size"), p.get("mark")
+    since_settle = (mark - p["settled_at"]) * size if None not in (mark, p.get("settled_at"), size) else None
+
+    def near(a, b):
+        return "n/a" if a is None or b is None else "yes" if abs(a - b) <= max(1.0, 0.02 * abs(b)) else "no"
+    return (f"unrealized_pnl = since entry {near(p.get('unrealized'), since_entry)}, = since settlement "
+            f"{near(p.get('unrealized'), since_settle)}; aggregated_pnl = since entry {near(p.get('aggregated'), since_entry)}")
 
 
 def _describe(v, depth: int = 0) -> str:
@@ -348,6 +360,8 @@ POSITION_FIELDS = {  # what the dashboard shows: the field names Coinbase's endp
     "leverage": ("leverage",),
     "notional": ("position_notional",),
     "maintenance": ("mm_notional",),
+    "aggregated": ("aggregated_pnl",),
+    "settled_at": ("vwap",),  # on a daily-settled perp, the price open P&L was last settled at
 }
 
 
@@ -359,6 +373,12 @@ def position_from(item: dict) -> dict:
     if out["size"] is not None and "SHORT" in side and out["size"] > 0:
         out["size"] = -out["size"]
     out["liquidation_from"] = "exchange" if out["liquidation"] is not None else None
+    # open P&L from the average entry: Coinbase's unrealized_pnl on a daily-settled perp counts only since the
+    # last settlement, because each settlement moves the P&L so far into the cash balance
+    if None not in (out["size"], out["mark"], out["entry"]):
+        out["pnl_since_entry"] = (out["mark"] - out["entry"]) * out["size"]
+    else:
+        out["pnl_since_entry"] = None
     return out
 
 

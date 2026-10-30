@@ -406,3 +406,12 @@ def test_the_check_lists_the_app_wallets_transaction_types_and_fields_but_never_
     assert "perpetuals_trade: fields amount, created_at, details, id, type; details subtitle, title" in lines
     for secret in ("4.5321", "2311", "acc-usdc", "SOL", "Bought"):
         assert secret not in lines, secret
+
+
+def test_open_pnl_is_measured_from_the_entry_and_the_check_says_which_coinbase_figure_matches():
+    item = {"product_id": "ETH_USDC-PERPETUAL", "position_side": "POSITION_SIDE_LONG", "net_size": "2.0",
+            "entry_vwap": {"value": "2300"}, "vwap": {"value": "2236"}, "mark_price": {"value": "2240"},
+            "unrealized_pnl": {"value": "8"}, "aggregated_pnl": {"value": "-120"}}
+    p = coinbase.position_from(item)
+    assert p["pnl_since_entry"] == pytest.approx(-120.0)  # (2240 - 2300) x 2
+    assert coinbase._pnl_check(p) == "unrealized_pnl = since entry no, = since settlement yes; aggregated_pnl = since entry yes"
