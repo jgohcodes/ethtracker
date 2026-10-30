@@ -263,3 +263,12 @@ def test_trading_the_crossings_buys_on_the_way_up_and_sells_on_the_way_down():
     tp = score.cross_strategy(close, sc, take_profit=0.1, fee=0.0)
     assert tp.multiple == pytest.approx(1.1)  # out at 110
     assert score.hold(close).multiple == pytest.approx(0.8)
+
+
+def test_the_trading_signal_follows_the_step_scores_crossings():
+    idx = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
+    step = pd.Series([-0.3, 0.0, 0.2, 0.0, -0.1, -0.5], index=idx)
+    close = pd.Series([1.0, 2, 3, 4, 5, 6], index=idx)
+    sig = score.trading_signal(step, close, 4)
+    assert sig["state"] == "out" and sig["since"] == "2026-01-05" and sig["step"] == -0.5
+    assert [(f["date"], f["to"]) for f in sig["flips"]] == [("2026-01-03", "in"), ("2026-01-05", "out")]

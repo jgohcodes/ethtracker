@@ -307,6 +307,7 @@ def block(cfg, history: pd.DataFrame, funding8h: pd.Series | None, frame: pd.Dat
         "history": [{"date": f"{d:%Y-%m-%d}", "score": round(float(v), 4), "close": round(float(history["close"][d]), 2)}
                     for d, v in path.items() if pd.notna(v)],
         "step": None if pd.isna(step.iloc[-1]) else float(step.iloc[-1]),
+        "signal": trading_signal(step, history["close"], HISTORY_DAYS),
         "calibration": calibration(history, score, today) if today is not None else None,
         "components": components, "unscored": unscored(cfg, frame, derivs),
         "strip_dates": [f"{d:%Y-%m-%d}" for d in history.index[-STRIP_DAYS:]],
@@ -499,6 +500,25 @@ def flips_per_year(score: pd.Series) -> float:
     changes = int((s != s.shift()).sum()) - 1
     years = (s.index[-1] - s.index[0]).days / 365.25
     return changes / years if years > 0 else float("nan")
+
+
+def trading_signal(step: pd.Series, close: pd.Series, days: int) -> dict | None:
+    """The step score's crossings as a trading signal: in after it crosses above 0, out after it crosses below
+    (the rule that beat holding ETH in score-study, before and after 2021). Today's state, the day it took it, and
+    every flip in the last ``days`` days."""
+    state, flips = None, []
+    for d, v in step.items():
+        if pd.isna(v):
+            continue
+        new = "in" if v > 0 else "out" if v < 0 else state
+        if new != state and new is not None:
+            flips.append({"date": f"{d:%Y-%m-%d}", "to": new, "close": round(float(close[d]), 2)})
+        state = new
+    if state is None:
+        return None
+    first = step.index[-days] if len(step) >= days else step.index[0]
+    return {"state": state, "since": flips[-1]["date"], "step": float(step.dropna().iloc[-1]),
+            "flips": [f for f in flips if pd.Timestamp(f["date"], tz="UTC") >= first]}
 
 
 # ---- trading the score's crossings ---------------------------------------------------------------------

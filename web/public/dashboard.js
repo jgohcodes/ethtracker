@@ -666,7 +666,7 @@ function trail(row) {
 let scoreRange = 90;
 const RANGES = [[90, "3 months"], [365, "1 year"]];
 
-function scorePriceChart(history, trades = []) {
+function scorePriceChart(history, trades = [], signal = null) {
   const days = history.slice(-scoreRange);
   const n = days.length;
   if (n < 2) return null;
@@ -705,7 +705,7 @@ function scorePriceChart(history, trades = []) {
   finite(last.close) ? svg("circle", { cx: x(n - 1).toFixed(1), cy: yp(last.close).toFixed(1), r: 3.2, class: "sp__now" }) : null,
   priceLabels(closes, last.close, yp, L + pw + 6, T + 9, T + ph).map(([y, t, now]) =>
     text({ x: L + pw + 6, y: y.toFixed(1), class: now ? "sp__axis sp__axis--now" : "sp__axis" }, t)),
-  ticks, hits, tradeMarkers(trades, days, x, L + pw, T, ph, step));
+  flipMarkers(signal, days, x, yp), ticks, hits, tradeMarkers(trades, days, x, L + pw, T, ph, step));
 }
 
 // A numbered marker and a dashed line at each open trade's day; a trade made since the last close sits at the
@@ -736,6 +736,30 @@ function tradeMarkers(trades, days, x, right, top, height, step) {
   });
 }
 
+// The trading signal: in after the step score crosses above 0, out after it crosses below. The rule that beat
+// holding ETH before and after 2021 in score-study (11x against 3x since 2021, 8x if traded a day late).
+function signalLine(sig) {
+  if (!sig) return null;
+  const inMarket = sig.state === "in";
+  return h("div", { class: "signal-line" },
+    h("span", { class: "muted", text: "Trading signal " }),
+    badge(inMarket ? "good" : "critical", inMarket ? "▲" : "▼", inMarket ? "In" : "Out", true),
+    h("span", { class: "muted", text: ` since ${shortDate(sig.since)} · step score ${signedFixed(sig.step)} · ` +
+      (inMarket ? "out when it crosses below 0" : "in when it crosses above 0") }));
+}
+
+// A triangle on the price line where the trading signal flipped: up for in, down for out.
+function flipMarkers(sig, days, x, yp) {
+  if (!sig) return [];
+  const at = new Map(days.map((d, i) => [d.date, i]));
+  return (sig.flips ?? []).filter((f) => at.has(f.date)).map((f) => {
+    const i = at.get(f.date), cx = x(i), cy = yp(days[i].close), up = f.to === "in";
+    const pts = up ? `${cx - 5},${cy + 12} ${cx + 5},${cy + 12} ${cx},${cy + 4}` : `${cx - 5},${cy - 12} ${cx + 5},${cy - 12} ${cx},${cy - 4}`;
+    return svg("polygon", { points: pts, class: up ? "sp__flip sp__flip--in" : "sp__flip sp__flip--out" },
+      svg("title", {}, document.createTextNode(`${f.date}: signal ${up ? "in" : "out"} at ${usd(f.close, 0)}`)));
+  });
+}
+
 // The right axis: the period's high and low, and today's close beside its point; a high or low label that
 // would sit on top of today's is dropped.
 function priceLabels(closes, now, yp, x, top, bottom) {
@@ -745,7 +769,7 @@ function priceLabels(closes, now, yp, x, top, bottom) {
   return [...labels.filter(([ly]) => Math.abs(ly - y) >= 12), [y, usd(now, 0), true]];
 }
 
-function scoreChartBlock(history, trades = []) {
+function scoreChartBlock(history, trades = [], signal = null) {
   const box = h("div", { class: "sp-wrap" });
   const draw = () => {
     const buttons = RANGES.filter(([d]) => d <= Math.max(90, history.length)).map(([d, t]) => {
@@ -757,9 +781,10 @@ function scoreChartBlock(history, trades = []) {
       h("div", { class: "sp-head" },
         h("div", { class: "sp-key" },
           h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__bars", "aria-hidden": "true" }), "Signal score (left axis)"),
-          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__line", "aria-hidden": "true" }), "ETH daily close (right axis)")),
+          h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__line", "aria-hidden": "true" }), "ETH daily close (right axis)"),
+          signal ? h("span", { class: "sp-key__item" }, h("span", { class: "sp-key__flip", "aria-hidden": "true", text: "▲▼" }), "Trading signal in / out") : null),
         h("div", { class: "seg", role: "group", "aria-label": "Chart range" }, buttons)),
-      scorePriceChart(history, trades));
+      scorePriceChart(history, trades, signal));
   };
   draw();
   return box;
@@ -783,7 +808,8 @@ function renderScore(s) {
     .map(([k, t]) => h("span", { class: "ago" }, h("span", { class: "muted", text: `${t} ` }), signedFixed(sc.ago[k])));
   const lead = h("div", { class: "score__lead" },
     h("div", { class: "score__value" }, h("span", { class: "score__number", text: signedFixed(sc.value) }), badge(info.tone, info.icon, info.label, true)),
-    h("div", { class: "score__ago" }, ago));
+    h("div", { class: "score__ago" }, ago),
+    signalLine(sc.signal));
   // the institutional era leads; the full history follows, because the large early swings skew its averages
   const recentLine = cal?.same_recent?.days
     ? `Since ${cal.recent_from.slice(0, 4)}, days scored ${cal.bucket.toLowerCase()} (${signedFixed(cal.range[0], 1)} to ${signedFixed(cal.range[1], 1)}; ` +
@@ -818,7 +844,7 @@ function renderScore(s) {
     "so a line heading for a dashed line is a signal weakening before it turns. Momentum and trend draw a thin second line ",
     "(the 7-day return; the 20-day against the 50-day): their state needs both on the same side of zero. ",
     "An amber ring marks a risk flag that day. Hover a line for its values. \u201cAdds\u201d is each signal's share of today's score.");
-  const overlay = h("div", { class: "score__overlay" }, scoreChartBlock(sc.history, tradeList(s)),
+  const overlay = h("div", { class: "score__overlay" }, scoreChartBlock(sc.history, tradeList(s), sc.signal),
     h("p", { class: "note", text: "Read the bars against the line, not as a forecast of it: on ETH's history the score " +
       "mostly echoes the last few weeks of price (its correlation with the past 28 days' return is about +0.84) and " +
       "barely leads the next 30 (about +0.10 since 2021). It turns after a top or bottom, typically 1 to 4 weeks late." }));

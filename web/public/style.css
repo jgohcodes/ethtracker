@@ -231,6 +231,11 @@ main { padding-block: 8px 40px; display: grid; gap: 20px; }
 .sp__bar--pos { fill: var(--good); opacity: 0.55; }
 .sp__bar--neg { fill: var(--critical); opacity: 0.55; }
 .sp__bar--flat { fill: var(--muted); opacity: 0.5; }
+.sp__flip { stroke: var(--surface); stroke-width: 1; }
+.sp__flip--in { fill: var(--good); }
+.sp__flip--out { fill: var(--critical); }
+.sp-key__flip { font-size: 9px; letter-spacing: -1px; color: var(--ink-2); }
+.signal-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13.5px; margin-top: 6px; }
 .sp__price { fill: none; stroke: var(--ink); stroke-width: 1.7; stroke-linejoin: round; }
 .sp__now { fill: var(--ink); stroke: var(--surface); stroke-width: 1.5; }
 .sp__axis { font-size: 10.5px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
